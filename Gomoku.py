@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
+import random
 
 # 定义棋盘大小和胜利条件
 BOARD_SIZE = 15
@@ -9,6 +10,7 @@ WIN_CONDITION = 5
 
 # 标志位，控制是否使用GPU
 USE_GPU = torch.cuda.is_available()
+print("USE_GPU:", USE_GPU)
 
 # 游戏环境
 class Gomoku:
@@ -49,6 +51,11 @@ class Gomoku:
         self.current_player = 3 - self.current_player
         return 0, False
 
+    def print_board(self):
+        for row in self.board:
+            print(' '.join(['X' if x == 1 else 'O' if x == 2 else '.' for x in row]))
+        print()
+
 # 神经网络模型
 class GomokuNet(nn.Module):
     def __init__(self):
@@ -63,14 +70,17 @@ class GomokuNet(nn.Module):
         x = self.fc3(x)
         return x
 
-def get_valid_action(logits, board):
+def get_valid_action(logits, board, random_factor=0.1):
     valid_actions = []
     for i in range(BOARD_SIZE * BOARD_SIZE):
         x, y = i // BOARD_SIZE, i % BOARD_SIZE
         if board[x, y] == 0:
             valid_actions.append((logits[i], i))
     valid_actions.sort(reverse=True)
-    return valid_actions[0][1] if valid_actions else -1
+    if random.random() < random_factor:
+        return random.choice(valid_actions)[1] if valid_actions else -1
+    else:
+        return valid_actions[0][1] if valid_actions else -1
 
 # 训练过程
 def train():
@@ -82,7 +92,7 @@ def train():
     optimizer2 = optim.Adam(model2.parameters())
     criterion = nn.CrossEntropyLoss()
 
-    for round in range(1000):
+    for round in range(10000):  # 增加训练回合数
         env.reset()
         done = False
 
@@ -92,11 +102,13 @@ def train():
             if env.current_player == 1:
                 logits = model1(state)
                 optimizer = optimizer1
+                random_factor = 0.0  # Player1 不引入随机性
             else:
                 logits = model2(state)
                 optimizer = optimizer2
+                random_factor = 0.3  # Player2 增加随机性
 
-            action = get_valid_action(logits, env.board)
+            action = get_valid_action(logits, env.board, random_factor)
             if action == -1:
                 break
             reward, done = env.step(action)
@@ -109,11 +121,14 @@ def train():
                 optimizer.step()
 
             if done and reward != 0:
-                print(f"round {round}, Player {reward} wins")
+                print(f"Round {round}, Player {reward} wins")
+                env.print_board()  # 打印棋盘最终状态
 
-        # 每一千个回合保存一次模型
+        # 每一千个回合重置Player2
         if (round + 1) % 1000 == 0:
             torch.save(model1.state_dict(), f'gobang_model_player1_{round + 1}.pth')
+            model2 = GomokuNet().to(device)  # 重置Player2
+            optimizer2 = optim.Adam(model2.parameters())
 
     # 保存最终的Player1模型
     torch.save(model1.state_dict(), 'gobang_best_model.pth')
