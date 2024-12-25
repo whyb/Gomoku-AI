@@ -8,6 +8,15 @@ NEED_PRINT_BOARD = False  # 打印棋盘
 USE_GPU = torch.cuda.is_available()
 print("USE_GPU:", USE_GPU)
 
+import random
+
+def get_random_smaller_thousand_multiple(number):
+    if number <= 1000:
+        return "input number must > 1000。"
+    # 生成比输入数字小的、但不等于0的以1000为倍数的整数列表
+    multiples = [i for i in range(1000, number, 1000)]
+    return random.choice(multiples) if multiples else "has no number"
+
 def train():
     device = torch.device("cuda" if USE_GPU else "cpu")
     env = Gomoku()
@@ -23,7 +32,7 @@ def train():
 
     epsilon = 0.1  # 设置Epsilon-Greedy策略中的epsilon值
 
-    for round in range(10000):  # 增加训练回合数
+    for round in range(100000):  # 增加训练回合数
         env.reset()
         done = False
 
@@ -37,7 +46,7 @@ def train():
             else:
                 logits = model2(state)
                 optimizer = optimizer2
-                action = get_valid_action(logits.cpu().detach().numpy(), env.board, 0.3)  # Player2 增加随机性
+                action = get_valid_action(logits.cpu().detach().numpy(), env.board, 0.45)  # Player2 增加随机性
 
             if action == -1:
                 break
@@ -60,7 +69,8 @@ def train():
             torch.save(model1.state_dict(), f'gobang_model_player1_{round + 1}.pth')
             model2 = GomokuNetV2().to(device)  # 重置Player2
             optimizer2 = optim.Adam(model2.parameters())
-            load_model_if_exists(model2, f'gobang_model_player1_{round + 1}.pth')
+            random_pth_number = get_random_smaller_thousand_multiple(round + 1)
+            load_model_if_exists(model2, f'gobang_model_player1_{random_pth_number}.pth')
 
     # 保存最终的Player1模型
     torch.save(model1.state_dict(), 'gobang_best_model.pth')

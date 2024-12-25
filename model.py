@@ -4,8 +4,8 @@ import torch.nn as nn
 import numpy as np
 import random
 
-BOARD_SIZE = 15 # 定义棋盘大小
-WIN_CONDITION = 5 # 胜利条件
+BOARD_SIZE = 8  # 定义棋盘大小
+WIN_CONDITION = 5  # 胜利条件
 
 # 游戏环境
 class Gomoku:
@@ -44,21 +44,79 @@ class Gomoku:
         return False
 
     def step(self, action):
+        # 解析动作坐标, 将传入的action转换为棋盘上的坐标
         x, y = action // BOARD_SIZE, action % BOARD_SIZE
+        # 检查目标位置是否已被占用
         if self.board[x, y] != 0:
             return -1, True
+        # 落子
         self.board[x, y] = self.current_player
         if self.is_winning_move(x, y):
             return self.current_player, True
-        self.current_player = 3 - self.current_player
         
+        # 切换到另外一个棋手 1变2，2变1
+        self.current_player = 3 - self.current_player
+
         # 中间奖励score机制
         score = self.evaluate_board()
         return score, False
 
     def evaluate_board(self):
-        # TODO 实现一个函数评估当前棋盘状态，返回一个分数
-        return 0  # 这里需要根据实际情况实现具体的评估逻辑
+        score = 0
+        directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
+
+        def evaluate_line(player, x, y, dx, dy):
+            count = 1
+            block = 0
+            for step in range(1, WIN_CONDITION):
+                nx, ny = x + dx * step, y + dy * step
+                if 0 <= nx < BOARD_SIZE and 0 <= ny < BOARD_SIZE:
+                    if self.board[nx, ny] == player:
+                        count += 1
+                    elif self.board[nx, ny] == 0:
+                        break
+                    else:
+                        block += 1
+                        break
+                else:
+                    block += 1
+                    break
+            for step in range(1, WIN_CONDITION):
+                nx, ny = x - dx * step, y - dy * step
+                if 0 <= nx < BOARD_SIZE and 0 <= ny < BOARD_SIZE:
+                    if self.board[nx, ny] == player:
+                        count += 1
+                    elif self.board[nx, ny] == 0:
+                        break
+                    else:
+                        block += 1
+                        break
+                else:
+                    block += 1
+                    break
+            return count, block
+
+        for i in range(BOARD_SIZE):
+            for j in range(BOARD_SIZE):
+                if self.board[i, j] != 0:
+                    player = self.board[i, j]
+                    for dx, dy in directions:
+                        count, block = evaluate_line(player, i, j, dx, dy)
+                        if count >= WIN_CONDITION:
+                            score += 10000
+                        elif count == 4 and block == 0:
+                            score += 500
+                        elif count == 4 and block == 1:
+                            score += 100
+                        elif count == 3 and block == 0:
+                            score += 50
+                        elif count == 3 and block == 1:
+                            score += 10
+                        elif count == 2 and block == 0:
+                            score += 5
+                        elif count == 2 and block == 1:
+                            score += 1
+        return score
 
     def print_board(self):
         for i in range(BOARD_SIZE):
@@ -102,21 +160,6 @@ class GomokuNetV2(nn.Module):
         x = self.fc2(x)
         return x
 
-
-# def get_valid_action(logits, board, epsilon=0.1):
-#     valid_actions = []
-#     for i in range(BOARD_SIZE * BOARD_SIZE):
-#         x, y = i // BOARD_SIZE, i % BOARD_SIZE
-#         if board[x, y] == 0:
-#             valid_actions.append((logits[i], i))
-#     valid_actions.sort(reverse=True)
-
-#     if random.random() < epsilon:
-#         return random.choice(valid_actions)[1] if valid_actions else -1
-#     else:
-#         return valid_actions[0][1] if valid_actions else -1
-
-
 def get_valid_action(logits, board, epsilon=0.1):
     logits = logits.flatten()  # 展平logits，确保其形状为(BOARD_SIZE * BOARD_SIZE,)
     valid_actions = [(logits[i].item(), i) for i in range(BOARD_SIZE * BOARD_SIZE) if board[i // BOARD_SIZE, i % BOARD_SIZE] == 0]
@@ -126,7 +169,6 @@ def get_valid_action(logits, board, epsilon=0.1):
         return random.choice(valid_actions)[1] if valid_actions else -1
     else:
         return valid_actions[0][1] if valid_actions else -1
-
 
 def load_model_if_exists(model, file_path):
     if os.path.exists(file_path):

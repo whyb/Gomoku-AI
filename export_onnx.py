@@ -3,7 +3,7 @@ import sys
 import torch
 from model import GomokuNetV2
 
-BOARD_SIZE = 15
+BOARD_SIZE = 8  # 定义棋盘大小
 
 def load_model(model, file_path):
     if os.path.exists(file_path):
