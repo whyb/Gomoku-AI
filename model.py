@@ -1,44 +1,45 @@
 import os
 import torch
 import torch.nn as nn
-import torch.optim as optim
 import numpy as np
 import random
 
 BOARD_SIZE = 15 # 定义棋盘大小
 WIN_CONDITION = 5 # 胜利条件
-NEED_PRINT_BOARD = False # 打印棋盘
-
-
-USE_GPU = torch.cuda.is_available() # 是否使用GPU
-print("USE_GPU:", USE_GPU)
 
 # 游戏环境
 class Gomoku:
     def __init__(self):
         self.board = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=int)
         self.current_player = 1
+        self.winning_line = []
 
     def reset(self):
         self.board.fill(0)
         self.current_player = 1
+        self.winning_line = []
 
     def is_winning_move(self, x, y):
         # 检查五子连珠的胜利条件
         def count_consecutive(player, dx, dy):
             count = 0
+            line = [(x, y)]
             for step in range(1, WIN_CONDITION):
                 nx, ny = x + dx * step, y + dy * step
                 if 0 <= nx < BOARD_SIZE and 0 <= ny < BOARD_SIZE and self.board[nx, ny] == player:
                     count += 1
+                    line.append((nx, ny))
                 else:
                     break
-            return count
+            return count, line
 
         player = self.board[x, y]
         directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
         for dx, dy in directions:
-            if count_consecutive(player, dx, dy) + count_consecutive(player, -dx, -dy) >= WIN_CONDITION - 1:
+            count1, line1 = count_consecutive(player, dx, dy)
+            count2, line2 = count_consecutive(player, -dx, -dy)
+            if count1 + count2 >= WIN_CONDITION - 1:
+                self.winning_line = line1 + line2[1:]
                 return True
         return False
 
@@ -53,8 +54,14 @@ class Gomoku:
         return 0, False
 
     def print_board(self):
-        for row in self.board:
-            print(' '.join(['X' if x == 1 else 'O' if x == 2 else '.' for x in row]))
+        for i in range(BOARD_SIZE):
+            row = ''
+            for j in range(BOARD_SIZE):
+                if (i, j) in self.winning_line:
+                    row += '\033[91mX\033[0m ' if self.board[i, j] == 1 else '\033[91mO\033[0m ' if self.board[i, j] == 2 else '. '
+                else:
+                    row += 'X ' if self.board[i, j] == 1 else 'O ' if self.board[i, j] == 2 else '. '
+            print(row)
         print()
 
 # 神经网络模型
@@ -90,61 +97,3 @@ def load_model_if_exists(model, file_path):
         print(f"Loaded model weights from {file_path}")
     else:
         print(f"No saved model weights found at {file_path}")
-
-# 训练过程
-def train():
-    device = torch.device("cuda" if USE_GPU else "cpu")
-    env = Gomoku()
-    model1 = GomokuNet().to(device)
-    model2 = GomokuNet().to(device)  # 作为陪练模型
-    optimizer1 = optim.Adam(model1.parameters())
-    optimizer2 = optim.Adam(model2.parameters())
-    criterion = nn.CrossEntropyLoss()
-
-    # 尝试加载模型权重
-    load_model_if_exists(model1, 'gobang_best_model.pth')
-
-    epsilon = 0.1  # 设置Epsilon-Greedy策略中的epsilon值
-
-    for round in range(10000):  # 增加训练回合数
-        env.reset()
-        done = False
-
-        while not done:
-            state = torch.FloatTensor(env.board.flatten()).to(device)
-
-            if env.current_player == 1:
-                logits = model1(state)
-                optimizer = optimizer1
-                action = get_valid_action(logits, env.board, epsilon)
-            else:
-                logits = model2(state)
-                optimizer = optimizer2
-                action = get_valid_action(logits, env.board, 0.3)  # Player2 增加随机性
-
-            if action == -1:
-                break
-            reward, done = env.step(action)
-
-            if reward != -1:
-                target = torch.LongTensor([action]).to(device)
-                loss = criterion(logits.unsqueeze(0), target)
-                optimizer.zero_grad()
-                loss.backward()
-                optimizer.step()
-
-            if done and reward != 0:
-                print(f"Round {round}, Player {reward} wins")
-                if NEED_PRINT_BOARD:
-                    env.print_board()  # 打印棋盘最终状态
-
-        # 每一千个回合重置Player2
-        if (round + 1) % 1000 == 0:
-            torch.save(model1.state_dict(), f'gobang_model_player1_{round + 1}.pth')
-            model2 = GomokuNet().to(device)  # 重置Player2
-            optimizer2 = optim.Adam(model2.parameters())
-
-    # 保存最终的Player1模型
-    torch.save(model1.state_dict(), 'gobang_best_model.pth')
-
-train()
