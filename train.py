@@ -62,6 +62,7 @@ def train():
             torch.save(model1.state_dict(), f'gobang_model_player1_{round + 1}.pth')
             model2 = GomokuNet().to(device)  # 重置Player2
             optimizer2 = optim.Adam(model2.parameters())
+            load_model_if_exists(model2, f'gobang_model_player1_{round + 1}.pth')
 
     # 保存最终的Player1模型
     torch.save(model1.state_dict(), 'gobang_best_model.pth')
