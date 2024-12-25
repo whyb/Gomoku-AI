@@ -71,14 +71,15 @@ class GomokuNet(nn.Module):
         x = self.fc3(x)
         return x
 
-def get_valid_action(logits, board, random_factor=0.1):
+def get_valid_action(logits, board, epsilon=0.1):
     valid_actions = []
     for i in range(BOARD_SIZE * BOARD_SIZE):
         x, y = i // BOARD_SIZE, i % BOARD_SIZE
         if board[x, y] == 0:
             valid_actions.append((logits[i], i))
     valid_actions.sort(reverse=True)
-    if random.random() < random_factor:
+
+    if random.random() < epsilon:
         return random.choice(valid_actions)[1] if valid_actions else -1
     else:
         return valid_actions[0][1] if valid_actions else -1
@@ -103,6 +104,8 @@ def train():
     # 尝试加载模型权重
     load_model_if_exists(model1, 'gobang_best_model.pth')
 
+    epsilon = 0.1  # 设置Epsilon-Greedy策略中的epsilon值
+
     for round in range(10000):  # 增加训练回合数
         env.reset()
         done = False
@@ -113,13 +116,12 @@ def train():
             if env.current_player == 1:
                 logits = model1(state)
                 optimizer = optimizer1
-                random_factor = 0.0  # Player1 不引入随机性
+                action = get_valid_action(logits, env.board, epsilon)
             else:
                 logits = model2(state)
                 optimizer = optimizer2
-                random_factor = 0.3  # Player2 增加随机性
+                action = get_valid_action(logits, env.board, 0.3)  # Player2 增加随机性
 
-            action = get_valid_action(logits, env.board, random_factor)
             if action == -1:
                 break
             reward, done = env.step(action)
