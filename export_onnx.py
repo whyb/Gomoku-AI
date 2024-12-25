@@ -1,7 +1,7 @@
 import os
 import sys
 import torch
-from model import GomokuNet
+from model import GomokuNetV2
 
 BOARD_SIZE = 15
 
@@ -35,7 +35,7 @@ if __name__ == "__main__":
     torchscript_output_path = "model_torchscript.pt"  # 输出 TorchScript 模型文件路径
     onnx_output_path = "model.onnx"  # 输出 ONNX 模型文件路径
 
-    model = GomokuNet()
+    model = GomokuNetV2()
     load_model(model, pth_file_path)
     
     export_torchscript(model, torchscript_output_path)

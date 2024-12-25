@@ -51,7 +51,14 @@ class Gomoku:
         if self.is_winning_move(x, y):
             return self.current_player, True
         self.current_player = 3 - self.current_player
-        return 0, False
+        
+        # 中间奖励score机制
+        score = self.evaluate_board()
+        return score, False
+
+    def evaluate_board(self):
+        # TODO 实现一个函数评估当前棋盘状态，返回一个分数
+        return 0  # 这里需要根据实际情况实现具体的评估逻辑
 
     def print_board(self):
         for i in range(BOARD_SIZE):
@@ -64,10 +71,10 @@ class Gomoku:
             print(row)
         print()
 
-# 神经网络模型
-class GomokuNet(nn.Module):
+# Version #1
+class GomokuNetV1(nn.Module):
     def __init__(self):
-        super(GomokuNet, self).__init__()
+        super(GomokuNetV1, self).__init__()
         self.fc1 = nn.Linear(BOARD_SIZE * BOARD_SIZE, 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc3 = nn.Linear(256, BOARD_SIZE * BOARD_SIZE)
@@ -78,18 +85,48 @@ class GomokuNet(nn.Module):
         x = self.fc3(x)
         return x
 
+# 卷积神经网络（CNN）
+class GomokuNetV2(nn.Module):
+    def __init__(self):
+        super(GomokuNetV2, self).__init__()
+        self.conv1 = nn.Conv2d(1, 64, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.fc1 = nn.Linear(128 * BOARD_SIZE * BOARD_SIZE, 256)
+        self.fc2 = nn.Linear(256, BOARD_SIZE * BOARD_SIZE)
+
+    def forward(self, x):
+        x = torch.relu(self.conv1(x.view(-1, 1, BOARD_SIZE, BOARD_SIZE)))
+        x = torch.relu(self.conv2(x))
+        x = x.view(-1, 128 * BOARD_SIZE * BOARD_SIZE)
+        x = torch.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+
+# def get_valid_action(logits, board, epsilon=0.1):
+#     valid_actions = []
+#     for i in range(BOARD_SIZE * BOARD_SIZE):
+#         x, y = i // BOARD_SIZE, i % BOARD_SIZE
+#         if board[x, y] == 0:
+#             valid_actions.append((logits[i], i))
+#     valid_actions.sort(reverse=True)
+
+#     if random.random() < epsilon:
+#         return random.choice(valid_actions)[1] if valid_actions else -1
+#     else:
+#         return valid_actions[0][1] if valid_actions else -1
+
+
 def get_valid_action(logits, board, epsilon=0.1):
-    valid_actions = []
-    for i in range(BOARD_SIZE * BOARD_SIZE):
-        x, y = i // BOARD_SIZE, i % BOARD_SIZE
-        if board[x, y] == 0:
-            valid_actions.append((logits[i], i))
-    valid_actions.sort(reverse=True)
+    logits = logits.flatten()  # 展平logits，确保其形状为(BOARD_SIZE * BOARD_SIZE,)
+    valid_actions = [(logits[i].item(), i) for i in range(BOARD_SIZE * BOARD_SIZE) if board[i // BOARD_SIZE, i % BOARD_SIZE] == 0]
+    valid_actions.sort(reverse=True, key=lambda x: x[0])  # 根据 logits 从大到小排序
 
     if random.random() < epsilon:
         return random.choice(valid_actions)[1] if valid_actions else -1
     else:
         return valid_actions[0][1] if valid_actions else -1
+
 
 def load_model_if_exists(model, file_path):
     if os.path.exists(file_path):

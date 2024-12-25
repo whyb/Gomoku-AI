@@ -1,20 +1,18 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.nn import functional as F
-from model import Gomoku, GomokuNet, get_valid_action, load_model_if_exists
+from model import Gomoku, GomokuNetV2, get_valid_action, load_model_if_exists
 
-NEED_PRINT_BOARD = True # 打印棋盘
+NEED_PRINT_BOARD = False  # 打印棋盘
 # 标志位，控制是否使用GPU
 USE_GPU = torch.cuda.is_available()
-USE_GPU = False
 print("USE_GPU:", USE_GPU)
 
 def train():
     device = torch.device("cuda" if USE_GPU else "cpu")
     env = Gomoku()
-    model1 = GomokuNet().to(device)
-    model2 = GomokuNet().to(device)  # 作为陪练模型
+    model1 = GomokuNetV2().to(device)
+    model2 = GomokuNetV2().to(device)  # 作为陪练模型
     optimizer1 = optim.Adam(model1.parameters())
     optimizer2 = optim.Adam(model2.parameters())
     criterion = nn.CrossEntropyLoss()
@@ -30,16 +28,16 @@ def train():
         done = False
 
         while not done:
-            state = torch.FloatTensor(env.board.flatten()).to(device)
+            state = torch.FloatTensor(env.board.flatten()).unsqueeze(0).to(device)  # 增加batch维度
 
             if env.current_player == 1:
                 logits = model1(state)
                 optimizer = optimizer1
-                action = get_valid_action(logits, env.board, epsilon)
+                action = get_valid_action(logits.cpu().detach().numpy(), env.board, epsilon)
             else:
                 logits = model2(state)
                 optimizer = optimizer2
-                action = get_valid_action(logits, env.board, 0.3)  # Player2 增加随机性
+                action = get_valid_action(logits.cpu().detach().numpy(), env.board, 0.3)  # Player2 增加随机性
 
             if action == -1:
                 break
@@ -47,7 +45,7 @@ def train():
 
             if reward != -1:
                 target = torch.LongTensor([action]).to(device)
-                loss = criterion(logits.unsqueeze(0), target)
+                loss = criterion(logits.view(1, -1), target)
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
@@ -60,7 +58,7 @@ def train():
         # 每一千个回合重置Player2
         if (round + 1) % 1000 == 0:
             torch.save(model1.state_dict(), f'gobang_model_player1_{round + 1}.pth')
-            model2 = GomokuNet().to(device)  # 重置Player2
+            model2 = GomokuNetV2().to(device)  # 重置Player2
             optimizer2 = optim.Adam(model2.parameters())
             load_model_if_exists(model2, f'gobang_model_player1_{round + 1}.pth')
 
