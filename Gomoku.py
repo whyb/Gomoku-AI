@@ -1,3 +1,4 @@
+import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -82,6 +83,13 @@ def get_valid_action(logits, board, random_factor=0.1):
     else:
         return valid_actions[0][1] if valid_actions else -1
 
+def load_model_if_exists(model, file_path):
+    if os.path.exists(file_path):
+        model.load_state_dict(torch.load(file_path))
+        print(f"Loaded model weights from {file_path}")
+    else:
+        print(f"No saved model weights found at {file_path}")
+
 # 训练过程
 def train():
     device = torch.device("cuda" if USE_GPU else "cpu")
@@ -91,6 +99,9 @@ def train():
     optimizer1 = optim.Adam(model1.parameters())
     optimizer2 = optim.Adam(model2.parameters())
     criterion = nn.CrossEntropyLoss()
+
+    # 尝试加载模型权重
+    load_model_if_exists(model1, 'gobang_best_model.pth')
 
     for round in range(10000):  # 增加训练回合数
         env.reset()
