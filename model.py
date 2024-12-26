@@ -5,10 +5,8 @@ import torch.nn as nn
 import numpy as np
 import random
 
-
 BOARD_SIZE = 8  # 定义棋盘大小
 WIN_CONDITION = 5  # 胜利条件
-
 
 # 游戏环境
 class Gomoku:
@@ -16,13 +14,13 @@ class Gomoku:
         self.board = np.zeros((BOARD_SIZE, BOARD_SIZE), dtype=int)
         self.current_player = 1
         self.winning_line = []
-
+        self.step_count = 0  # 记录步数
 
     def reset(self):
         self.board.fill(0)
         self.current_player = 1
         self.winning_line = []
-
+        self.step_count = 0  # 重置步数
 
     def is_winning_move(self, x, y):
         # 检查五子连珠的胜利条件
@@ -38,7 +36,6 @@ class Gomoku:
                     break
             return count, line
 
-
         player = self.board[x, y]
         directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
         for dx, dy in directions:
@@ -49,84 +46,64 @@ class Gomoku:
                 return True
         return False
 
-
-    def step(self, action):
-        # 解析动作坐标, 将传入的 action 转换为棋盘上的坐标
-        x, y = action // BOARD_SIZE, action % BOARD_SIZE
-        # 检查目标位置是否已被占用
-        if self.board[x, y]!= 0:
-            return -1, True, 0
-        # 落子
-        self.board[x, y] = self.current_player
-        if self.is_winning_move(x, y):
-            if self.current_player == 1:
-                return 1, True, 10000  # Player 1 五子连珠获胜
-            else:
-                return 2, True, -10000  # Player 2 五子连珠获胜
-        
-        # 切换到另外一个棋手 1 变 2，2 变 1
-        self.current_player = 3 - self.current_player
-
-        # 中间奖励 score 机制
-        score = self.evaluate_board()
-        return self.board[x, y], False, score
-
-
-    def evaluate_board(self):
-        def count_consecutive(player, x, y, dx, dy):
-            """
-            计算在特定方向上玩家的连续棋子数
-            :param player: 玩家编号（1 或 2）
-            :param x: 起始 x 坐标
-            :param y: 起始 y 坐标
-            :param dx: x 方向增量
-            :param dy: y 方向增量
-            :return: 连续棋子数
-            """
+    def calculate_reward(self, x, y):
+        def count_consecutive(player, dx, dy):
             count = 0
-            for step in range(WIN_CONDITION):
-                nx = x + dx * step
-                ny = y + dy * step
+            for step in range(1, WIN_CONDITION):
+                nx, ny = x + dx * step, y + dy * step
                 if 0 <= nx < BOARD_SIZE and 0 <= ny < BOARD_SIZE and self.board[nx, ny] == player:
                     count += 1
                 else:
                     break
             return count
 
-
+        player = self.board[x, y]
         directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
-        score = 0
-        for x in range(BOARD_SIZE):
-            for y in range(BOARD_SIZE):
-                player = self.board[x, y]
-                if player == 0:
-                    continue
-                for dx, dy in directions:
-                    count = count_consecutive(player, x, y, dx, dy)
-                    if count == 5:  # 五子连珠
-                        score += 10000
-                    elif count == 4:  # 四子连珠
-                        score += 500
-                    elif count == 3:  # 三子连珠
-                        score += 100
-                    elif count == 2:  # 二子连珠
-                        score += 10
-                    
-        return score
+        rewards = {2: 10, 3: 100, 4: 500, 5: 10000}
+        total_reward = 0
+        for dx, dy in directions:
+            count1 = count_consecutive(player, dx, dy)
+            count2 = count_consecutive(player, -dx, -dy)
+            total_count = count1 + count2 + 1
+            if total_count in rewards:
+                total_reward += rewards[total_count]
+        return total_count, total_reward
 
+    def step(self, action):
+        # 解析动作坐标, 将传入的 action 转换为棋盘上的坐标
+        x, y = action // BOARD_SIZE, action % BOARD_SIZE
+        # 检查目标位置是否已被占用
+        if self.board[x, y] != 0:
+            return -1, True, 0, 0
+        # 落子
+        self.board[x, y] = self.current_player
+        self.step_count += 1  # 步数加一
+        #bonus_reward = (BOARD_SIZE * BOARD_SIZE - self.step_count) * 10  # 步数越少奖励越多
+        #bonus_reward = bonus_reward if self.current_player == 1 else -bonus_reward
+        bonus_reward = 0
+        if self.is_winning_move(x, y):
+            base_reward = 10000
+            total_reward = base_reward + bonus_reward
+            return self.current_player, True, total_reward, 5
+        
+        # 计算局部奖励
+        total_count, total_reward = self.calculate_reward(x, y)
+        total_reward = total_reward + bonus_reward
+        
+        # 切换到另外一个棋手 1 变 2，2 变 1
+        self.current_player = 3 - self.current_player
+        return self.board[x, y], False, total_reward, total_count
 
     def simulate_move(self, action):
         x, y = action // BOARD_SIZE, action % BOARD_SIZE
-        if self.board[x, y]!= 0:
+        if self.board[x, y] != 0:
             return False
         self.board[x, y] = self.current_player
         self.current_player = 3 - self.current_player
         return True
 
-
     def evaluate_state(self):
         return self.evaluate_board()
-
 
     def print_board(self):
         for i in range(BOARD_SIZE):
@@ -139,7 +116,6 @@ class Gomoku:
             print(row)
         print()
 
-
 # Version #1
 class GomokuNetV1(nn.Module):
     def __init__(self):
@@ -148,13 +124,11 @@ class GomokuNetV1(nn.Module):
         self.fc2 = nn.Linear(256, 256)
         self.fc3 = nn.Linear(256, BOARD_SIZE * BOARD_SIZE)
 
-
     def forward(self, x):
         x = torch.relu(self.fc1(x))
         x = torch.relu(self.fc2(x))
         x = self.fc3(x)
         return x
-
 
 # 卷积神经网络（CNN）
 class GomokuNetV2(nn.Module):
@@ -165,7 +139,6 @@ class GomokuNetV2(nn.Module):
         self.fc1 = nn.Linear(128 * BOARD_SIZE * BOARD_SIZE, 256)
         self.fc2 = nn.Linear(256, BOARD_SIZE * BOARD_SIZE)
 
-
     def forward(self, x):
         x = torch.relu(self.conv1(x.view(-1, 1, BOARD_SIZE, BOARD_SIZE)))
         x = torch.relu(self.conv2(x))
@@ -174,18 +147,20 @@ class GomokuNetV2(nn.Module):
         x = self.fc2(x)
         return x
 
-
 def get_valid_action(logits, board, epsilon=0.1):
     logits = logits.flatten()  # 展平 logits，确保其形状为(BOARD_SIZE * BOARD_SIZE,)
     valid_actions = [(logits[i].item(), i) for i in range(BOARD_SIZE * BOARD_SIZE) if board[i // BOARD_SIZE, i % BOARD_SIZE] == 0]
     valid_actions.sort(reverse=True, key=lambda x: x[0])  # 根据 logits 从大到小排序
 
-
+    '''
+    转换为棋盘坐标：
+    行：row = action // BOARD_SIZE，对于 action = 8，row = 8 // 3 = 2
+    列：col = action % BOARD_SIZE，对于 action = 8，col = 8 % 3 = 2
+    '''
     if random.random() < epsilon:
         return random.choice(valid_actions)[1] if valid_actions else -1
     else:
         return valid_actions[0][1] if valid_actions else -1
-
 
 def load_model_if_exists(model, file_path):
     if os.path.exists(file_path):

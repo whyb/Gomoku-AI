@@ -4,23 +4,22 @@ import torch.nn as nn
 import torch.optim as optim
 from model import Gomoku, GomokuNetV2, get_valid_action, load_model_if_exists
 
-
-import random
-
+BOARD_SIZE = 8
+NEED_PRINT_BOARD = True
 
 def get_random_smaller_thousand_multiple(number):
     """
-    生成比输入数字小的、但不等于 0 的以 1000 为倍数的整数列表，并根据线性分布随机选择一个。
+    生成比输入数字小的、但不等于 0 的以 10000 为倍数的整数列表，并根据线性分布随机选择一个。
     :param number: 输入的数字
     :return: 随机选择的倍数，如果不满足条件返回相应的信息
     """
-    if number < 1000:
-        return "input number must >= 1000."
-    # 当 number 等于 1000 时，将 multiples 列表初始化为包含 1000
-    if number == 1000:
-        multiples = [1000]
+    if number < 10000:
+        return "input number must >= 10000."
+    # 当 number 等于 10000 时，将 multiples 列表初始化为包含 10000
+    if number == 10000:
+        multiples = [10000]
     else:
-        multiples = [i for i in range(1000, number, 1000)]
+        multiples = [i for i in range(10000, number, 10000)]
     # 计算每个元素的权重，这里使用线性分布，数字越大权重越大
     weights = [i for i in range(1, len(multiples) + 1)]
     # 随机选择一个元素，根据计算出的权重
@@ -45,8 +44,8 @@ def setup_players_and_optimizers(device):
     """
     model1 = GomokuNetV2().to(device)
     model2 = GomokuNetV2().to(device)
-    optimizer1 = optim.Adam(model1.parameters())
-    optimizer2 = optim.Adam(model2.parameters())
+    optimizer1 = optim.Adam(model1.parameters(), lr=0.001)  # 使用Adam优化器
+    optimizer2 = optim.Adam(model1.parameters(), lr=0.001)  # 使用Adam优化器
     return model1, model2, optimizer1, optimizer2
 
 
@@ -61,6 +60,26 @@ def load_model_weights(model, optimizer, model_path):
     optimizer = optim.Adam(model.parameters())
 
 
+def get_valid_action_with_exploration(logits, board, epsilon=0.1):
+    """
+    在选择动作时加入随机性
+    :param logits: 模型的输出
+    :param board: 当前的棋盘状态
+    :param epsilon: 探索率
+    :return: 选择的动作
+    """
+    logits = logits.flatten()
+    valid_actions = [(logits[i].item(), i) for i in range(BOARD_SIZE * BOARD_SIZE) if board[i // BOARD_SIZE, i % BOARD_SIZE] == 0]
+    valid_actions.sort(reverse=True, key=lambda x: x[0])  # 根据 logits 从大到小排序
+
+    # epsilon-greedy策略
+    if random.random() < epsilon:
+        return random.choice(valid_actions)[1] if valid_actions else -1
+    else:
+        top_k = min(3, len(valid_actions))  # 选择前top_k个动作中的一个
+        return random.choice(valid_actions[:top_k])[1] if valid_actions else -1
+
+
 def select_action(env, model, optimizer, state, epsilon):
     """
     为玩家选择动作
@@ -72,7 +91,7 @@ def select_action(env, model, optimizer, state, epsilon):
     :return: 选择的动作
     """
     logits = model(state)
-    action = get_valid_action(logits.cpu().detach().numpy(), env.board, epsilon)
+    action = get_valid_action_with_exploration(logits.cpu().detach().numpy(), env.board, epsilon)
     return logits, optimizer, action
 
 
@@ -87,7 +106,7 @@ def update_model(reward, logits, optimizer, action, env, criterion, device):
     :param criterion: 损失函数
     :param device: 设备
     """
-    if reward!= 0:  # 当奖励不为 0 时更新模型
+    if reward != 0:  # 当奖励不为 0 时更新模型
         target = torch.LongTensor([action]).to(device)
         # 改进：根据分数调整损失函数
         loss = criterion(logits.view(1, -1), target) * torch.FloatTensor([reward]).to(device)
@@ -95,26 +114,13 @@ def update_model(reward, logits, optimizer, action, env, criterion, device):
         loss.backward()
         optimizer.step()
 
-
-def print_game_result(env, round, reward, current_player):
-    """
-    打印游戏结果和最终棋盘状态
-    :param env: 游戏环境
-    :param round: 回合数
-    :param reward: 奖励
-    """
-    if abs(reward) == 10000:  # 五子连珠获胜或失败
-        print(f"Round {round}, Player {current_player} win with 5 in a row!")
-    # elif abs(reward) == 1000:  # 一般获胜或失败
-    #     print(f"Round {round}, Player {current_player} win!")
-    elif abs(reward) == 500:  # 四子连珠获胜或失败
-        print(f"\tRound {round}, Player {current_player} has 4 in a row!")
-    elif abs(reward) == 100:  # 三子连珠获胜或失败
-        print(f"\tRound {round}, Player {current_player} has 3 in a row!")
-    elif abs(reward) == 10:  # 二子连珠获胜或失败
-        print(f"\tRound {round}, Player {current_player} has 2 in a row!")
-    #env.print_board()
-
+def print_game_result(env, round, reward, current_player, total_count):
+    symbol = "X" if current_player == 1 else "O"
+    display_symbol = symbol * total_count if current_player == 1 else symbol * total_count
+    if total_count > 4:
+        print(f"Round {round}\tPlayer {current_player} has {total_count} in a row!\t{display_symbol}")
+        if NEED_PRINT_BOARD:
+            env.print_board()
 
 def train():
     """
@@ -124,39 +130,36 @@ def train():
     env = Gomoku()
     model1, model2, optimizer1, optimizer2 = setup_players_and_optimizers(device)
     load_model_if_exists(model1, 'gobang_best_model.pth')
-    load_model_if_exists(model2, 'gobang_best_model.pth')
     criterion1 = nn.CrossEntropyLoss()
     criterion2 = nn.CrossEntropyLoss()
-    epsilon = 0.1
+    epsilon1 = 0.3
+    epsilon2 = 0.5
 
-
-    for round in range(100000):
+    for round in range(1000000):
         env.reset()
         done = False
         while not done:
             state = torch.FloatTensor(env.board.flatten()).unsqueeze(0).to(device)
+            score = 0
             if env.current_player == 1:
-                logits1, optimizer1, action = select_action(env, model1, optimizer1, state, epsilon)
+                logits1, optimizer1, action1 = select_action(env, model1, optimizer1, state, epsilon1)
+                if action1 == -1:
+                    break
+                current_player, done, score, total_count = env.step(action1)
+                update_model(score, logits1, optimizer1, action1, env, criterion1, device)
             else:
-                logits2, optimizer2, action = select_action(env, model2, optimizer2, state, 0.3)
-            if action == -1:
-                break
-            current_player, done, score = env.step(action)
-            if current_player == 1:
-                update_model(score, logits1, optimizer1, action, env, criterion1, device)
-            else:
-                update_model(score, logits2, optimizer2, action, env, criterion2, device)
+                logits2, optimizer2, action2 = select_action(env, model2, optimizer2, state, epsilon2)
+                if action2 == -1:
+                    break
+                current_player, done, score, total_count = env.step(action2)
+                update_model(score, logits2, optimizer2, action2, env, criterion2, device)
 
-            print_game_result(env, round, score, current_player)
+            print_game_result(env, round, score, current_player, total_count)
 
-
-        if (round + 1) % 1000 == 0:
+        if (round + 1) % 10000 == 0:
             torch.save(model1.state_dict(), f'gobang_model_player1_{round + 1}.pth')
             model2 = GomokuNetV2().to(device)
             optimizer2 = optim.Adam(model2.parameters())
-            random_pth_number = get_random_smaller_thousand_multiple(round + 1)
-            load_model_weights(model2, optimizer2, f'gobang_model_player1_{random_pth_number}.pth')
-
 
     torch.save(model1.state_dict(), 'gobang_best_model.pth')
 

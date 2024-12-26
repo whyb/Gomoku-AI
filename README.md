@@ -36,7 +36,7 @@ pip install -r requirements.txt
 python train.py
 ```
 
-在训练过程中，每一千个回合会保存一次Player1的模型权重，你可以在当前目录下找到名为`gobang_model_player1_*.pth`的文件，
+在训练过程中，每10000回合会保存一次Player1的模型权重，你可以在当前目录下找到名为`gobang_model_player1_*.pth`的文件，
 当然你可以可以把回合数根据自己的需要修改成更大。
 
 训练完全结束后会生成一个名为`gobang_best_model.pth`的最终权重文件，下次重新启动你仍然可以从这个权重节点继续开始训练。
