@@ -13,8 +13,8 @@ def validator():
     model2 = GomokuNetV2().to(device)
 
     # 加载模型权重
-    load_model_if_exists(model1, 'gobang_model_player1_12000.pth')
-    load_model_if_exists(model2, 'gobang_model_player1_9000.pth')
+    load_model_if_exists(model1, 'gobang_best_model.pth')
+    load_model_if_exists(model2, 'gobang_best_model.pth')
 
     player1_win_count = 0
     player2_win_count = 0
@@ -28,26 +28,26 @@ def validator():
             state = torch.FloatTensor(env.board.flatten()).unsqueeze(0).to(device)  # 增加batch维度
             if env.current_player == 1:
                 logits = model1(state)
-                action = get_valid_action(logits.cpu().detach().numpy(), env.board, 0.01)
+                action = get_valid_action(logits.cpu().detach().numpy(), env.board, 0.0001)
             else:
                 logits = model2(state)
-                action = get_valid_action(logits.cpu().detach().numpy(), env.board, 0.4)  # Player2 增加随机性
+                action = get_valid_action(logits.cpu().detach().numpy(), env.board, 0.1)  # Player2 增加随机性
 
             if action == -1:
                 print("No valid actions available. Ending the game.")
                 break
-            reward, done = env.step(action)
+            current_player, done, reward = env.step(action)
             #if NEED_PRINT_BOARD:  # 打印中间状态
                 #env.print_board()
             if done:
-                if reward == 1:
+                if current_player == 1:
                     player1_win_count += 1
-                elif reward == 2:
+                elif current_player == 2:
                     player2_win_count += 1
                 total_game_count = player1_win_count + player2_win_count
                 player1_win_rate = (player1_win_count / total_game_count) * 100 if total_game_count > 0 else 0
                 player2_win_rate = (player2_win_count / total_game_count) * 100 if total_game_count > 0 else 0
-                print(f"Validator Round {round},\tPlayer {reward} win!\tPlayer 1 win rate: {player1_win_rate:.2f}%, Player 2 win rate: {player2_win_rate:.2f}%")
+                print(f"Validator Round {round},\tPlayer {current_player} win!\tPlayer 1 win rate: {player1_win_rate:.2f}%, Player 2 win rate: {player2_win_rate:.2f}%")
                 if NEED_PRINT_BOARD:
                     env.print_board()
                 break
