@@ -4,152 +4,205 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import argparse
+from collections import deque
 from model import Gomoku, GomokuNetV2, get_valid_action, load_model_if_exists
 from config import Config, update_config_from_cli
 
 def setup_device():
     use_gpu = torch.cuda.is_available()
-    print("USE_GPU:", use_gpu)
+    print(f"[初始化] 使用GPU: {use_gpu}")
     return torch.device("cuda" if use_gpu else "cpu")
 
 
 def setup_players_and_optimizers(device, board_size):
-    # 初始化两个玩家的模型和优化器（独立参数）
     model1 = GomokuNetV2(board_size).to(device)
     model2 = GomokuNetV2(board_size).to(device)
     optimizer1 = optim.Adam(model1.parameters(), lr=Config.LEARNING_RATE)
     optimizer2 = optim.Adam(model2.parameters(), lr=Config.LEARNING_RATE)
+    print(f"[初始化] 模型创建完成 - 棋盘尺寸: {board_size}x{board_size}")
     return model1, model2, optimizer1, optimizer2
 
 
 def get_epsilon(step, start, end, decay):
-    # 探索率指数衰减策略
     return end + (start - end) * math.exp(-1. * step / decay)
 
 
-def select_action(env, model, state, epsilon):
-    # 生成动作概率分布
-    logits = model(state)  # 形状为 (1, board_size*board_size)
+def select_action(env, model, state, epsilon, device):
+    with torch.no_grad():
+        logits = model(state)
     
-    # 将张量转换为numpy数组处理（避免直接索引张量导致的错误）
-    logits_np = logits.cpu().detach().numpy().flatten()
+    board_flat = torch.tensor(env.board.flatten(), device=device, dtype=torch.float32)
+    valid_mask = (board_flat == 0)
     
-    # 筛选有效动作（仅空位可落子）
-    valid_actions = [
-        (logits_np[i], i) 
-        for i in range(env.board_size * env.board_size) 
-        if env.board[i // env.board_size, i % env.board_size] == 0
-    ]
+    valid_logits = logits[valid_mask.unsqueeze(0)]
+    valid_indices = torch.where(valid_mask)[0]
     
-    if not valid_actions:
-        return logits, -1  # 无有效动作
+    if valid_indices.numel() == 0:
+        return logits, -1
     
-    valid_actions.sort(reverse=True, key=lambda x: x[0])  # 按分数排序
+    valid_logits_np = valid_logits.cpu().numpy().flatten()
+    valid_indices_np = valid_indices.cpu().numpy()
+    valid_actions = list(zip(valid_logits_np, valid_indices_np))
+    valid_actions.sort(reverse=True, key=lambda x: x[0])
     
-    # epsilon-greedy策略选择动作
     if random.random() < epsilon:
         return logits, random.choice(valid_actions)[1]
     else:
-        # 从top3中随机选择（增加一定探索性）
         top_k = min(3, len(valid_actions))
         return logits, random.choice(valid_actions[:top_k])[1]
 
 
-def update_model(reward, logits, optimizer, action, env, criterion, device, step, current_model):
-    # 每步更新模型
-    target = torch.LongTensor([action]).to(device)
+def update_model_batch(model, optimizer, criterion, batch, device, is_model1=True):
+    states, actions, rewards = zip(*batch)
+    states = torch.cat(states).to(device)
+    actions = torch.tensor(actions, device=device)
+    rewards = torch.tensor(rewards, device=device, dtype=torch.float32)
     
-    # 奖励归一化（缓解奖励值差异过大导致的训练不稳定）
-    reward_norm = torch.tanh(torch.FloatTensor([reward]).to(device) / 1000)
+    rewards_norm = torch.tanh(rewards / 1000)
+    logits = model(states)
+    loss = criterion(logits, actions) * rewards_norm.mean()
     
-    # 计算损失（交叉熵损失 * 归一化奖励）
-    loss = criterion(logits.view(1, -1), target) * reward_norm
-    
-    # 反向传播与参数更新
     optimizer.zero_grad()
     loss.backward()
-    
-    # 梯度裁剪（作用于当前模型参数，防止梯度爆炸）
-    torch.nn.utils.clip_grad_norm_(current_model.parameters(), max_norm=1.0)
-    
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     optimizer.step()
+    
+    return loss.item(), rewards.mean().item()
 
 
 def train():
-    # 解析命令行参数（支持动态设置棋盘尺寸和胜利条件）
     parser = argparse.ArgumentParser()
     parser.add_argument("--board_size", type=int, help="Size of the game board")
     parser.add_argument("--win_condition", type=int, help="Number of consecutive stones to win")
     args = parser.parse_args()
     config = update_config_from_cli(args)
 
+    # 配置参数
+    BATCH_SIZE = 128
+    REPLAY_BUFFER_SIZE = 10000
+    UPDATE_FREQ = 4
+    PRINT_INTERVAL = 500  # 每500局打印一次进度
     device = setup_device()
+    
+    # 初始化环境和模型
     env = Gomoku(config.BOARD_SIZE, config.WIN_CONDITION)
     model1, model2, optimizer1, optimizer2 = setup_players_and_optimizers(device, config.BOARD_SIZE)
     
-    # 加载已有模型（若存在）
-    load_model_if_exists(model1, 'gobang_best_model.pth')
+    # 经验回放池
+    replay_buffer1 = deque(maxlen=REPLAY_BUFFER_SIZE)
+    replay_buffer2 = deque(maxlen=REPLAY_BUFFER_SIZE)
     
-    # 保留历史最优模型作为陪练
+    # 加载模型
+    load_model_if_exists(model1, 'gobang_best_model.pth')
     best_model = GomokuNetV2(config.BOARD_SIZE).to(device)
     best_model.load_state_dict(model1.state_dict())
     criterion = nn.CrossEntropyLoss()
+
+    # 统计变量
+    total_win1 = 0
+    total_win2 = 0
+    recent_win1 = 0  # 最近PRINT_INTERVAL局的胜利数
+    recent_win2 = 0
+    recent_steps = []  # 最近局的步数统计
+
+    print("\n[训练开始] --------------")
+    print(f"最大回合数: {config.MAX_EPISODES}")
+    print(f"批量大小: {BATCH_SIZE}")
+    print(f"模型保存间隔: {config.SAVE_INTERVAL}局")
+    print(f"进度打印间隔: {PRINT_INTERVAL}局\n")
 
     for episode in range(config.MAX_EPISODES):
         env.reset()
         done = False
         total_steps = 0
-        
-        # 动态获取当前探索率（随训练进程衰减）
+        episode_reward1 = 0
+        episode_reward2 = 0
+        winner = 0  # 0:未分胜负, 1:玩家1胜, 2:玩家2胜
+
         epsilon1 = get_epsilon(episode, config.EPSILON1_START, config.EPSILON1_END, config.EPSILON_DECAY)
         epsilon2 = get_epsilon(episode, config.EPSILON2_START, config.EPSILON2_END, config.EPSILON_DECAY)
 
         while not done:
-            # 转换当前棋盘状态为模型输入格式
             state = torch.FloatTensor(env.board.flatten()).unsqueeze(0).to(device)
             
-            # 根据当前玩家选择模型和参数
             if env.current_player == 1:
-                logits, action = select_action(env, model1, state, epsilon1)
-                optimizer = optimizer1
-                current_model = model1  # 当前训练的模型
+                logits, action = select_action(env, model1, state, epsilon1, device)
             else:
-                # 50%概率使用当前model2，50%使用历史最优模型作为陪练
                 if random.random() < 0.5:
-                    logits, action = select_action(env, model2, state, epsilon2)
+                    logits, action = select_action(env, model2, state, epsilon2, device)
                 else:
-                    logits, action = select_action(env, best_model, state, epsilon2 * 0.5)  # 陪练模型探索率降低
-                optimizer = optimizer2
-                current_model = model2  # 当前训练的模型
+                    logits, action = select_action(env, best_model, state, epsilon2 * 0.5, device)
 
-            # 处理无效动作（棋盘已满）
             if action == -1:
                 break
+                
+            current_player, done, reward, _ = env.step(action)
             
-            # 执行动作并获取反馈
-            current_player, done, reward, total_count = env.step(action)
+            # 累积奖励
+            if current_player == 1:
+                replay_buffer1.append((state.cpu().detach(), action, reward))
+                episode_reward1 += reward
+            else:
+                replay_buffer2.append((state.cpu().detach(), action, reward))
+                episode_reward2 += reward
             
-            # 更新当前模型
-            update_model(reward, logits, optimizer, action, env, criterion, device, total_steps, current_model)
             total_steps += 1
+            
+            # 批量更新
+            if (total_steps % UPDATE_FREQ == 0):
+                loss1 = None
+                loss2 = None
+                if len(replay_buffer1) >= BATCH_SIZE:
+                    batch = random.sample(replay_buffer1, BATCH_SIZE)
+                    loss1, mean_reward1 = update_model_batch(model1, optimizer1, criterion, batch, device, True)
+                
+                if len(replay_buffer2) >= BATCH_SIZE:
+                    batch = random.sample(replay_buffer2, BATCH_SIZE)
+                    loss2, mean_reward2 = update_model_batch(model2, optimizer2, criterion, batch, device, False)
 
-        # 定期保存模型并更新最优模型
+        # 记录本局结果
+        if done:
+            winner = current_player
+            if winner == 1:
+                total_win1 += 1
+                recent_win1 += 1
+            else:
+                total_win2 += 1
+                recent_win2 += 1
+        recent_steps.append(total_steps)
+
+        # 定期打印进度 (每PRINT_INTERVAL局)
+        if (episode + 1) % PRINT_INTERVAL == 0:
+            # 计算最近区间的统计值
+            avg_steps = sum(recent_steps) / len(recent_steps) if recent_steps else 0
+            recent_win_rate1 = recent_win1 / PRINT_INTERVAL * 100 if PRINT_INTERVAL > 0 else 0
+            recent_win_rate2 = recent_win2 / PRINT_INTERVAL * 100 if PRINT_INTERVAL > 0 else 0
+            total_win_rate1 = total_win1 / (episode + 1) * 100 if (episode + 1) > 0 else 0
+
+            print(f"[进度] 第 {episode + 1}/{config.MAX_EPISODES} 局")
+            print(f"  胜率: 最近 {PRINT_INTERVAL} 局 P1: {recent_win_rate1:.1f}% / P2: {recent_win_rate2:.1f}%")
+            print(f"  总体胜率: P1: {total_win_rate1:.1f}% ({total_win1}/{total_win2})")
+            print(f"  平均步数: {avg_steps:.1f} | 探索率: P1: {epsilon1:.4f} / P2: {epsilon2:.4f}")
+            if 'loss1' in locals() and loss1 is not None:
+                print(f"  损失值: P1: {loss1:.4f} / P2: {loss2:.4f}")
+            print("  ------------------------")
+            
+            # 重置最近统计
+            recent_win1 = 0
+            recent_win2 = 0
+            recent_steps = []
+
+        # 模型保存
         if (episode + 1) % config.SAVE_INTERVAL == 0:
-            # 保存当前model1
             torch.save(model1.state_dict(), f'gobang_model_player1_{episode + 1}.pth')
-            
-            # 更新最优模型（此处可根据实际评估指标优化，如胜率提升）
             best_model.load_state_dict(model1.state_dict())
-            
-            # 重置model2为当前最优模型的副本（作为新陪练）
             model2.load_state_dict(best_model.state_dict())
             optimizer2 = optim.Adam(model2.parameters(), lr=Config.LEARNING_RATE)
-            
-            print(f"Episode {episode + 1} - Model saved. Steps: {total_steps}, Epsilon1: {epsilon1:.4f}, Epsilon2: {epsilon2:.4f}")
+            print(f"[模型保存] 第 {episode + 1} 局模型已保存")
 
-    # 训练结束后保存最终模型
     torch.save(model1.state_dict(), 'gobang_best_model.pth')
-    print("Training completed. Final model saved.")
+    print("\n[训练结束] 最终模型已保存")
+    print(f"总胜率: P1: {total_win1/(total_win1+total_win2)*100:.1f}% ({total_win1}/{total_win2})")
 
 
 if __name__ == "__main__":
