@@ -16,8 +16,8 @@
 确保你已经安装了以下依赖：
 
 - Python 3.x
-- PyTorch
-- NumPy
+- torch 2.6.0
+- numpy 1.26.4
 
 ## 使用方法
 
@@ -33,7 +33,8 @@ pip install -r requirements.txt
 
 运行以下命令开始训练模型：
 ```shell
-python train.py
+python train.py --board_size 8  # 8x8棋盘
+python train.py --board_size 10 --win_condition 5  # 10x10棋盘，五子连珠胜利
 ```
 
 在训练过程中，每10000回合会保存一次Player1的模型权重，你可以在当前目录下找到名为`gobang_model_player1_*.pth`的文件，

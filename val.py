@@ -1,18 +1,21 @@
 import torch
+import argparse
 from model import Gomoku, GomokuNetV2, load_model_if_exists, get_valid_action
+from config import Config, update_config_from_cli
 
-NEED_PRINT_BOARD = True  # 打印棋盘
-# 标志位，控制是否使用GPU
-USE_GPU = torch.cuda.is_available()
-print("USE_GPU:", USE_GPU)
+NEED_PRINT_BOARD = True
 
 def validator():
-    device = torch.device("cuda" if USE_GPU else "cpu")
-    env = Gomoku()
-    model1 = GomokuNetV2().to(device)
-    model2 = GomokuNetV2().to(device)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--board_size", type=int, help="Size of the game board")
+    args = parser.parse_args()
+    config = update_config_from_cli(args)
 
-    # 加载模型权重
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    env = Gomoku(config.BOARD_SIZE)
+    model1 = GomokuNetV2(config.BOARD_SIZE).to(device)
+    model2 = GomokuNetV2(config.BOARD_SIZE).to(device)
+
     load_model_if_exists(model1, 'gobang_best_model.pth')
     load_model_if_exists(model2, 'gobang_best_model.pth')
 
@@ -22,36 +25,30 @@ def validator():
     for round in range(1000):
         env.reset()
         done = False
-        current_model = model1
-
         while not done:
-            state = torch.FloatTensor(env.board.flatten()).unsqueeze(0).to(device)  # 增加batch维度
+            state = torch.FloatTensor(env.board.flatten()).unsqueeze(0).to(device)
             if env.current_player == 1:
                 logits = model1(state)
                 action = get_valid_action(logits.cpu().detach().numpy(), env.board, 0.0001)
             else:
                 logits = model2(state)
-                action = get_valid_action(logits.cpu().detach().numpy(), env.board, 0.1)  # Player2 增加随机性
+                action = get_valid_action(logits.cpu().detach().numpy(), env.board, 0.1)
 
             if action == -1:
-                print("No valid actions available. Ending the game.")
                 break
-            current_player, done, reward = env.step(action)
-            #if NEED_PRINT_BOARD:  # 打印中间状态
-                #env.print_board()
+            current_player, done, reward, _ = env.step(action)
             if done:
                 if current_player == 1:
                     player1_win_count += 1
-                elif current_player == 2:
+                else:
                     player2_win_count += 1
-                total_game_count = player1_win_count + player2_win_count
-                player1_win_rate = (player1_win_count / total_game_count) * 100 if total_game_count > 0 else 0
-                player2_win_rate = (player2_win_count / total_game_count) * 100 if total_game_count > 0 else 0
-                print(f"Validator Round {round},\tPlayer {current_player} win!\tPlayer 1 win rate: {player1_win_rate:.2f}%, Player 2 win rate: {player2_win_rate:.2f}%")
+                total = player1_win_count + player2_win_count
+                rate1 = (player1_win_count / total) * 100 if total else 0
+                rate2 = (player2_win_count / total) * 100 if total else 0
+                print(f"Round {round},\tPlayer {current_player} win!\tWin rate: P1 {rate1:.2f}%, P2 {rate2:.2f}%")
                 if NEED_PRINT_BOARD:
                     env.print_board()
                 break
-            current_model = model2 if current_model == model1 else model1
 
 if __name__ == "__main__":
     validator()
