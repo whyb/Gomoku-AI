@@ -150,6 +150,28 @@ class Gomoku:
         self.current_player = 3 - self.current_player
         return self.board[x, y], False, total_reward, total_count
 
+    def print_board(self):
+        """打印当前棋盘状态，用 X 表示玩家1，O 表示玩家2，. 表示空位"""
+        # 打印列索引
+        print("   " + " ".join(f"{i:2}" for i in range(self.board_size)))
+        print("  +" + "--" * (self.board_size * 2 - 1) + "+")
+        
+        # 打印每行内容
+        for i in range(self.board_size):
+            row = [f"{i:2}|"]  # 行索引
+            for j in range(self.board_size):
+                if self.board[i, j] == 1:
+                    row.append(" X")
+                elif self.board[i, j] == 2:
+                    row.append(" O")
+                else:
+                    row.append(" .")
+            row.append(" |")
+            print("".join(row))
+        
+        # 打印底部边框
+        print("  +" + "--" * (self.board_size * 2 - 1) + "+")
+
 
 # 卷积神经网络（修复维度匹配问题）
 class GomokuNetV2(nn.Module):
