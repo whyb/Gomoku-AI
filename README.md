@@ -4,19 +4,20 @@
 
 ## 特点
 
-- 使用PyTorch实现神经网络模型
-- 训练及推理验证均支持使用GPU加速
-- Player1与Player2交替对战，Player1作为主要训练目标
-- 模型权重可以在训练期间会定期保存
-- 使用Adam优化器进行模型参数优化，交叉熵损失函数用于评估预测动作的准确性
-- 支持任意尺寸的棋盘
+- 使用 PyTorch 2.6.0+cu126 实现神经网络模型，支持 GPU 加速
+- 训练及推理验证均通过 PyTorch 内部机制自动检测并使用 GPU
+- Player1 与 Player2 交替对战，Player1 作为主要训练目标
+- 模型权重在训练期间会定期保存，支持断点续训
+- 使用 Adam 优化器进行模型参数优化，交叉熵损失函数用于评估预测动作的准确性
+- 支持自定义棋盘尺寸和胜利条件
+
 
 ## 依赖
 
 确保你已经安装了以下依赖：
 
-- Python 3.x
-- torch 2.6.0
+- Python 3.10+
+- torch 2.6.0+cu126（支持 CUDA 12.6 的 GPU 版本）
 - numpy 1.26.4
 
 ## 使用方法
@@ -24,33 +25,37 @@
 ### 安装环境
 
 ```shell
-conda create --name gomoku-ai python=3.8
+conda create --name gomoku-ai python=3.10
 conda activate gomoku-ai
 pip install -r requirements.txt
 ```
 
 ### 训练模型
 
-运行以下命令开始训练模型：
+运行以下命令开始训练模型，需指定棋盘尺寸和胜利条件：
 ```shell
-python train.py --board_size 8  # 8x8棋盘
-python train.py --board_size 10 --win_condition 5  # 10x10棋盘，五子连珠胜利
+# 4x4棋盘，连4子胜利
+python train.py --board_size 4 --win_condition 4
+
+# 8x8棋盘，连5子胜利
+python train.py --board_size 8 --win_condition 5
+
+# 10x10棋盘，连5子胜利
+python train.py --board_size 10 --win_condition 5
+
 ```
 
-在训练过程中，每10000回合会保存一次Player1的模型权重，你可以在当前目录下找到名为`gobang_model_player1_*.pth`的文件，
-当然你可以可以把回合数根据自己的需要修改成更大。
+训练过程中，每 `config.SAVE_INTERVAL` 回合会保存一次 Player1 的模型权重，生成 `gobang_model_player1_*.pth` 文件
 
-训练完全结束后会生成一个名为`gobang_best_model.pth`的最终权重文件，下次重新启动你仍然可以从这个权重节点继续开始训练。
+训练结束后会生成 `gobang_best_model.pth` 作为最终权重文件，支持从该文件继续训练
 
 
 ### 使用GPU
 
-默认情况下，代码会自动检测是否有可用的GPU，并在有GPU时使用CUDA。如果你希望强制使用或不使用GPU，可以手动设置USE_GPU标志位。
+代码会通过 PyTorch 自动检测并使用可用的 GPU，无需手动配置：
 
-```python
-USE_GPU = True  # 使用GPU
-USE_GPU = False  # 不使用GPU
-```
+* 若系统存在兼容的 NVIDIA GPU 且安装了对应 CUDA 版本，会自动启用 GPU 加速
+* 若无 GPU，会自动 fallback 到 CPU 模式运行
 
 ### 加载模型
 
@@ -58,25 +63,35 @@ USE_GPU = False  # 不使用GPU
 
 ```python
 import torch
-from model import GomokuNet
+from model import GomokuNetV2
 
-model = GomokuNet()
+# 需指定与训练时一致的棋盘尺寸
+model = GomokuNetV2(board_size=4)
 model.load_state_dict(torch.load('gobang_best_model.pth'))
 model.eval()
 ```
 
 ### 转换ONNX
 
-你可以使用以下命令将训练好的pth权重转换成ONNX模型和torchscript模型：
+您可以将训练好的模型转换为 ONNX 格式 和 torchscript 模型（需指定棋盘尺寸和胜利条件）：
 
 ```shell
-python export_onnx.py your_model.pth
+# 基础用法（4x4棋盘，连4子胜利）
+python export_onnx.py gobang_best_model.pth --board_size 4 --win_condition 4
+
+# 自定义输出路径
+python export_onnx.py gobang_best_model.pth \
+  --board_size 4 --win_condition 4 \
+  --onnx_path ./output/model_4x4.onnx \
+  --torchscript_path ./output/model_4x4.pt
+
 ```
-执行成功后，会在当前目录产生`model_torchscript.pt`、`model.onnx`两个文件
+执行成功后，会在output目录产生`model_4x4.pt`、`model_4x4.onnx`两个文件
 
 ### 打印棋盘
 
 如果您想要查看每一次训练或验证阶段打印当下棋局结果，观察过程，分析训练效果，有一个`NEED_PRINT_BOARD`变量可以控制辅助到您，设置成`True`或`False`开启或关闭。
+在验证阶段也可在val.py中设置`NEED_PRINT_BOARD = True`，可在每局结束后打印棋盘布局
 棋盘打印效果如下：
 ```
 . . . . X X X . . . . X O . .
