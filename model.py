@@ -1,6 +1,9 @@
 import os
+import math
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.nn import TransformerEncoder, TransformerEncoderLayer
 import numpy as np
 import random
 from config import Config
@@ -214,6 +217,104 @@ class GomokuNetV2(nn.Module):
         x = self.fc2(x)
         return x
 
+class ResidualConvBlock(nn.Module):
+    """残差卷积块：增强局部特征提取能力"""
+    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1):
+        super().__init__()
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size, padding=padding)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+        # 当输入输出通道不同时，用1x1卷积调整维度
+        self.shortcut = nn.Conv2d(in_channels, out_channels, kernel_size=1) if in_channels != out_channels else nn.Identity()
+
+    def forward(self, x):
+        residual = self.shortcut(x)  # 残差连接
+        x = F.relu(self.bn1(self.conv1(x)))
+        x = self.bn2(self.conv2(x))
+        x += residual  # 残差相加
+        return F.relu(x)
+
+
+class PositionalEncoding(nn.Module):
+    """位置编码：为棋盘位置添加空间位置信息（Transformer必备）"""
+    def __init__(self, d_model, board_size, max_len=5000):
+        super().__init__()
+        position = torch.arange(max_len).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        # 适配棋盘尺寸：生成 (board_size^2, d_model) 的位置编码
+        self.pe = pe[:board_size*board_size, :, :].transpose(0, 1)  # 形状：(1, N, d_model)，N=棋盘格数
+
+    def forward(self, x):
+        # x形状：(batch_size, N, d_model)，N=board_size^2
+        x = x + self.pe.to(x.device)  # 叠加位置编码
+        return x
+
+
+class GomokuNetV3(nn.Module):
+    """融合残差网络和Transformer的五子棋AI网络，输出格式与V2保持一致"""
+    def __init__(self, board_size, channels=64, num_res_blocks=2, num_heads=2, d_model=64):
+        super().__init__()
+        self.board_size = board_size
+        self.n = board_size * board_size  # 棋盘总格子数
+        self.d_model = d_model
+
+        # 1. 输入特征提取：将棋盘状态映射到高维特征
+        self.input_proj = nn.Conv2d(1, channels, kernel_size=3, padding=1)  # (1, B, B) -> (C, B, B)
+
+        # 2. 残差卷积模块：提取局部特征（连子、形状等）
+        self.res_blocks = nn.Sequential(
+            *[ResidualConvBlock(channels, channels) for _ in range(num_res_blocks)]
+        )
+
+        # 3. 维度转换：为Transformer准备输入（ flatten + 线性投影）
+        self.proj_to_transformer = nn.Linear(channels, d_model)  # 每个格子的特征 -> d_model维度
+        self.pos_encoder = PositionalEncoding(d_model, board_size)  # 位置编码
+
+        # 4. Transformer编码器：建模全局依赖（任意格子间的关系）
+        encoder_layers = TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=num_heads,
+            dim_feedforward=256,
+            dropout=0.1,
+            batch_first=True  # 设为True，输入形状为 (batch, seq_len, d_model)
+        )
+        self.transformer_encoder = TransformerEncoder(encoder_layers, num_layers=1)
+
+        # 5. 策略头：预测落子概率（仅返回策略logits，与V2保持一致）
+        self.policy_head = nn.Sequential(
+            nn.Linear(d_model, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1)  # 每个格子的落子分数
+        )
+
+    def forward(self, x):
+        # 输入形状：(batch_size, board_size*board_size) -> 转换为 (batch_size, 1, board_size, board_size)
+        x = x.view(-1, 1, self.board_size, self.board_size)  # (B, 1, B_size, B_size)
+
+        # 1. 输入特征提取
+        x = self.input_proj(x)  # (B, C, B_size, B_size)
+
+        # 2. 残差卷积提取局部特征
+        x = self.res_blocks(x)  # (B, C, B_size, B_size)
+
+        # 3. 转换为Transformer输入格式：(B, N, d_model)，N=B_size^2
+        x = x.flatten(2)  # (B, C, N) -> 展平为 (B, C, N)，N=B_size^2
+        x = x.transpose(1, 2)  # (B, N, C) -> 每个格子作为一个序列元素
+        x = self.proj_to_transformer(x)  # (B, N, d_model)
+
+        # 4. 叠加位置编码 + Transformer
+        x = self.pos_encoder(x)  # 叠加位置信息
+        x = self.transformer_encoder(x)  # (B, N, d_model)，输出全局特征
+
+        # 5. 策略头输出：(B, N) -> 每个位置的落子概率，仅返回这一项与V2保持一致
+        policy_logits = self.policy_head(x).squeeze(-1)  # (B, N)
+        
+        # 确保输出形状与V2完全一致：(batch_size, board_size*board_size)
+        return policy_logits
 
 def get_valid_action(logits, board, epsilon=0.1):
     board_size = board.shape[0]
