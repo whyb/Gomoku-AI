@@ -1,4 +1,3 @@
 *.pth
-*.onnx
 *.pt
 /__pycache__/*
