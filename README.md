@@ -2,6 +2,10 @@
 
 这个项目是一个使用PyTorch实现的五子棋AI，其中Player1是主要训练目标，而Player2作为陪练模型帮助Player1提升。项目参考了AlphaZero的经典设计，利用深度学习技术，通过神经网络模型（基于ResNet残差网络的深度结构和强化学习）的训练机制来模拟玩家下棋的策略。
 
+## Web Demo
+
+[人机对战](https://whyb.github.io/Gomoku-AI/webdemo/)
+
 ## 特点
 
 - 使用 PyTorch 2.6.0+cu126 实现神经网络模型，支持 GPU 加速。
@@ -53,194 +57,83 @@ python train.py --board_size 10 --win_condition 5
 ### AI 奖励机制详解
 
 五子棋的基本概念讲解：
+注：棋子说明: X 表示玩家棋子，O 表示对手棋子，. 表示空位。
 * 冲二 (Two in a row with one end blocked) 
 
   **含义**: 形成一个一端被堵住的二子连珠。价值最低，但能为后续发展奠定基础。
-<table style="border-collapse: collapse; border: 2px solid black; margin: 10px auto; font-size: 0; background-color: #EAB308;">
-<tr>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #1E40AF; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-</tr>
-</table>
+```
+. . . . .
+O X X . .
+. . . . .
+```
 * 活二 (Live Two)
 
   **含义**: 形成一个两端都没有被堵住的二子连珠。这是最基础的进攻棋形，有较小的奖励。
-<table style="border-collapse: collapse; border: 2px solid black; margin: 10px auto; font-size: 0; background-color: #EAB308;">
-<tr>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-</tr>
-</table>
+```
+. . . . .
+. . X X .
+. . . . .
+```
 
 * 冲三 (Three in a row with one end blocked)
 
   **含义**: 形成一个一端被堵住的三子连珠。需要两步才能成五，但仍然有进攻价值。
-<table style="border-collapse: collapse; border: 2px solid black; margin: 10px auto; font-size: 0; background-color: #EAB308;">
-<tr>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #1E40AF; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-</tr>
-</table>
+```
+. . . . . .
+. O X X X .
+. . . . . .
+```
 
 * 活三 (Live Three)
 
   **含义**: 形成一个两端都没有被堵住的三子连珠。可以发展为活四或冲四，是重要的潜在威胁。
-<table style="border-collapse: collapse; border: 2px solid black; margin: 10px auto; font-size: 0; background-color: #EAB308;">
-<tr>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-</tr>
-</table>
+```
+. . . . . . .
+. . . X X X .
+. . . . . . .
+```
 
 * 冲四 (Four in a row with one end blocked)
 
   **含义**: 形成一个一端被堵住的四子连珠。只需再下一子即可成五，是重要的进攻棋形。
-<table style="border-collapse: collapse; border: 2px solid black; margin: 10px auto; font-size: 0; background-color: #EAB308;">
-<tr>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #1E40AF; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-</tr>
-</table>
-<div style="text-align: center; margin-top: 5px; font-style: italic;">
-红色棋子形成一个冲四。AI只需在最左侧空位落子即可获胜。
-</div>
+```
+. . . . . . . . .
+. . O X X X X . .
+. . . . . . . . .
+```
 
 * 活四 (Live Four)
 
   **含义**: 形成一个两端都没有被堵住的四子连珠。这是一个必胜棋形，因为对手无法同时防守两端的落子点。
-<table style="border-collapse: collapse; border: 2px solid black; margin: 10px auto; font-size: 0; background-color: #EAB308;">
-<tr>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-<td style="width: 50px; height: 50px; border: 1px solid black; position: relative;"></td>
-</tr>
-</table>
-<div style="text-align: center; margin-top: 5px; font-style: italic;">
-AI落子在右侧的空位后，即可形成五子连珠，获得胜利。
-</div>
+```
+. . . . . . . . .
+. . . X X X X . .
+. . . . . . . . .
+```
 
 * 双活三 (Double Live Three)
 
   **含义**: 一次落子同时形成了两个活三。这种棋形通常会形成一个必胜局面，因为对手无法同时防守两个方向的进攻。
-<table style="border-collapse: collapse; border: 2px solid black; margin: 10px auto; font-size: 0; background-color: #EAB308;">
-<tr style="height: 50px;">
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-</tr>
-<tr style="height: 50px;">
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-</tr>
-<tr style="height: 50px;">
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-</tr>
-<tr style="height: 50px;">
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-</tr>
-</table>
-<div style="text-align: center; margin-top: 5px; font-style: italic;">
-AI落子在棋盘中心，同时形成了横向和斜向的两个活三，使对手无法同时防守。
-</div>
+```
+. . . . . . .
+. . . . . . .
+. . X . X X .
+. . . X . . .
+. . . X . . .
+. . . . . . .
+```
 
 * 冲四活三 (Four-in-a-row and Live Three)
 
   **含义**: 一次落子同时形成一个冲四和一个活三。这是五子棋中非常强大的组合，奖励值极高，通常意味着下一步即可获胜。
-<table style="border-collapse: collapse; border: 2px solid black; margin: 10px auto; font-size: 0; background-color: #EAB308;">
-<tr style="height: 50px;">
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-</tr>
-<tr style="height: 50px;">
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-</tr>
-<tr style="height: 50px;">
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #1E40AF; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-</tr>
-<tr style="height: 50px;">
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black; position: relative;"><div style="width: 40px; height: 40px; border-radius: 50%; background-color: #DC2626; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);"></div></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-<td style="width: 50px; border: 1px solid black;"></td>
-</tr>
-</table>
-<div style="text-align: center; margin-top: 5px; font-style: italic;">
-AI落子在中心位置，形成了左侧的冲四（被蓝色棋子堵住一端）和斜向的活三。AI可以优先在冲四的开口处落子获胜。
-</div>
+```
+. . . . . . . .
+. . . . . . . .
+. . X . . . . .
+. O X X X X . .
+. . X . . . . .
+. . . . . . . .
+```
 
 
 ### 模型架构与输入输出
