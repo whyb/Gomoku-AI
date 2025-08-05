@@ -23,14 +23,24 @@ class Gomoku:
         self.current_player = 1
         self.winning_line = []
         self.step_count = 0
+        return self.board
 
     def is_winning_move(self, x, y):
-        # 检查胜利条件（复用原逻辑，适配动态尺寸）
+        # 检查胜利条件
         def count_consecutive(player, dx, dy):
             count = 0
-            line = [(x, y)]
+            line = []
+            # 正向计数
             for step in range(1, self.win_condition):
                 nx, ny = x + dx * step, y + dy * step
+                if 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[nx, ny] == player:
+                    count += 1
+                    line.append((nx, ny))
+                else:
+                    break
+            # 反向计数
+            for step in range(1, self.win_condition):
+                nx, ny = x - dx * step, y - dy * step
                 if 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[nx, ny] == player:
                     count += 1
                     line.append((nx, ny))
@@ -41,75 +51,68 @@ class Gomoku:
         player = self.board[x, y]
         directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
         for dx, dy in directions:
-            count1, line1 = count_consecutive(player, dx, dy)
-            count2, line2 = count_consecutive(player, -dx, -dy)
-            if count1 + count2 >= self.win_condition - 1:
-                self.winning_line = line1 + line2[1:]
+            count, line = count_consecutive(player, dx, dy)
+            if count + 1 >= self.win_condition:
+                self.winning_line = [(x, y)] + line
                 return True
         return False
 
     def calculate_reward(self, x, y):
-        # 细化奖励计算（区分活/冲状态）
+        # 细化奖励计算，并考虑复合棋形
         player = self.board[x, y]
         opponent = 3 - player
         directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
         total_reward = 0
+        live_counts = {2: 0, 3: 0, 4: 0}
+        rush_counts = {2: 0, 3: 0, 4: 0}
 
-        # 检查自身连珠奖励
         for dx, dy in directions:
-            # 正向计数（同方向）
-            same_forward = 0
+            count = 1
+            forward_blocked = False
+            backward_blocked = False
+
+            # 正向计数
             for step in range(1, self.win_condition):
                 nx, ny = x + dx * step, y + dy * step
                 if 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[nx, ny] == player:
-                    same_forward += 1
+                    count += 1
                 else:
+                    if 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[nx, ny] == opponent:
+                        forward_blocked = True
                     break
-            # 反向计数（反方向）
-            same_backward = 0
+
+            # 反向计数
             for step in range(1, self.win_condition):
                 nx, ny = x - dx * step, y - dy * step
                 if 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[nx, ny] == player:
-                    same_backward += 1
+                    count += 1
                 else:
+                    if 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[nx, ny] == opponent:
+                        backward_blocked = True
                     break
-            total_same = same_forward + same_backward + 1  # 包含当前子
+            
+            if count >= 2:
+                if not forward_blocked and not backward_blocked:
+                    live_counts[min(count, 4)] += 1
+                elif forward_blocked != backward_blocked: # 只有一端被阻挡
+                    rush_counts[min(count, 4)] += 1
+        
+        # 复合棋形奖励
+        if live_counts[3] >= 2: total_reward += Config.REWARD["双活三"]
+        if rush_counts[4] >= 1 and live_counts[3] >= 1: total_reward += Config.REWARD["冲四活三"]
+        
+        # 单独棋形奖励
+        for num in range(2, 5):
+            total_reward += live_counts[num] * Config.REWARD[f"live{num}"]
+            total_reward += rush_counts[num] * Config.REWARD[f"冲{num}"]
 
-            # 检查两端是否被阻挡（判断"活"或"冲"）
-            forward_blocked = False
-            nx, ny = x + dx * (same_forward + 1), y + dy * (same_forward + 1)
-            if not (0 <= nx < self.board_size and 0 <= ny < self.board_size) or self.board[nx, ny] == opponent:
-                forward_blocked = True
-
-            backward_blocked = False
-            nx, ny = x - dx * (same_backward + 1), y - dy * (same_backward + 1)
-            if not (0 <= nx < self.board_size and 0 <= ny < self.board_size) or self.board[nx, ny] == opponent:
-                backward_blocked = True
-
-            # 活棋：两端至少一端未被阻挡；冲棋：两端都被阻挡
-            if total_same == 4:
-                if forward_blocked and backward_blocked:
-                    total_reward += Config.REWARD["冲四"]
-                else:
-                    total_reward += Config.REWARD["live4"]
-            elif total_same == 3:
-                if forward_blocked and backward_blocked:
-                    total_reward += Config.REWARD["冲三"]
-                else:
-                    total_reward += Config.REWARD["live3"]
-            elif total_same == 2:
-                if forward_blocked and backward_blocked:
-                    total_reward += Config.REWARD["冲二"]
-                else:
-                    total_reward += Config.REWARD["live2"]
-
-        # 检查是否阻断对手胜利
+        # 检查是否阻断对手胜利 (逻辑不变)
         temp_board = self.board.copy()
-        temp_board[x, y] = opponent  # 模拟对手落子
+        temp_board[x, y] = opponent
         if self._is_winning_move(temp_board, x, y, opponent):
             total_reward += Config.REWARD["block_win"]
 
-        return total_same, total_reward
+        return total_reward
 
     def _is_winning_move(self, board, x, y, player):
         # 内部辅助函数：检查指定棋盘上的落子是否胜利
@@ -137,21 +140,27 @@ class Gomoku:
     def step(self, action):
         x, y = action // self.board_size, action % self.board_size
         if self.board[x, y] != 0:
-            return -1, True, 0, 0  # 无效落子
+            return -1, True, 0  # 无效落子
         self.board[x, y] = self.current_player
         self.step_count += 1
 
         # 胜利奖励
         if self.is_winning_move(x, y):
-            total_reward = Config.REWARD["win"]
-            return self.current_player, True, total_reward, self.win_condition
+            reward = Config.REWARD["win"]
+            return self.current_player, True, reward
         
         # 计算连珠奖励
-        total_count, total_reward = self.calculate_reward(x, y)
+        reward = self.calculate_reward(x, y)
         
         # 切换玩家
         self.current_player = 3 - self.current_player
-        return self.board[x, y], False, total_reward, total_count
+        return self.board[x, y], False, reward
+    
+    def get_state_representation(self):
+        # 多通道输入表示
+        player1_board = (self.board == 1).astype(np.float32)
+        player2_board = (self.board == 2).astype(np.float32)
+        return np.stack([player1_board, player2_board], axis=0) # 形状: (2, board_size, board_size)
 
     def print_board(self):
         """打印当前棋盘状态，用 X 表示玩家1，O 表示玩家2，. 表示空位"""
@@ -259,72 +268,118 @@ class GomokuNetV3(nn.Module):
     def __init__(self, board_size, channels=64, num_res_blocks=2, num_heads=2, d_model=64):
         super().__init__()
         self.board_size = board_size
-        self.n = board_size * board_size  # 棋盘总格子数
+        self.n = board_size * board_size
         self.d_model = d_model
 
-        # 1. 输入特征提取：将棋盘状态映射到高维特征
-        self.input_proj = nn.Conv2d(1, channels, kernel_size=3, padding=1)  # (1, B, B) -> (C, B, B)
+        # 1. 输入特征提取：通道数从1改为2（玩家1和玩家2）
+        self.input_proj = nn.Conv2d(2, channels, kernel_size=3, padding=1)
 
-        # 2. 残差卷积模块：提取局部特征（连子、形状等）
+        # 2. 残差卷积模块：提取局部特征
         self.res_blocks = nn.Sequential(
             *[ResidualConvBlock(channels, channels) for _ in range(num_res_blocks)]
         )
 
-        # 3. 维度转换：为Transformer准备输入（ flatten + 线性投影）
-        self.proj_to_transformer = nn.Linear(channels, d_model)  # 每个格子的特征 -> d_model维度
-        self.pos_encoder = PositionalEncoding(d_model, board_size)  # 位置编码
+        # 3. 维度转换：为Transformer准备输入
+        self.proj_to_transformer = nn.Linear(channels, d_model)
+        self.pos_encoder = PositionalEncoding(d_model, board_size)
 
-        # 4. Transformer编码器：建模全局依赖（任意格子间的关系）
+        # 4. Transformer编码器：建模全局依赖
         encoder_layers = TransformerEncoderLayer(
             d_model=d_model,
             nhead=num_heads,
             dim_feedforward=256,
             dropout=0.1,
-            batch_first=True  # 设为True，输入形状为 (batch, seq_len, d_model)
+            batch_first=True
         )
         self.transformer_encoder = TransformerEncoder(encoder_layers, num_layers=1)
 
-        # 5. 策略头：预测落子概率（仅返回策略logits，与V2保持一致）
+        # 5. 策略头：预测落子概率（与V3一致）
         self.policy_head = nn.Sequential(
             nn.Linear(d_model, 64),
             nn.ReLU(),
-            nn.Linear(64, 1)  # 每个格子的落子分数
+            nn.Linear(64, 1)
+        )
+        
+        # 6. 价值头：预测当前局面的胜率（新增）
+        self.value_head = nn.Sequential(
+            nn.Linear(d_model * self.n, 256),
+            nn.ReLU(),
+            nn.Linear(256, 1),
+            nn.Tanh() # 输出-1到1之间的值，代表胜率
         )
 
     def forward(self, x):
-        # 输入形状：(batch_size, board_size*board_size) -> 转换为 (batch_size, 1, board_size, board_size)
-        x = x.view(-1, 1, self.board_size, self.board_size)  # (B, 1, B_size, B_size)
-
+        # 输入形状：(batch_size, 2, board_size, board_size)
+        
         # 1. 输入特征提取
-        x = self.input_proj(x)  # (B, C, B_size, B_size)
+        x = self.input_proj(x)
 
         # 2. 残差卷积提取局部特征
-        x = self.res_blocks(x)  # (B, C, B_size, B_size)
+        x = self.res_blocks(x)
 
-        # 3. 转换为Transformer输入格式：(B, N, d_model)，N=B_size^2
-        x = x.flatten(2)  # (B, C, N) -> 展平为 (B, C, N)，N=B_size^2
-        x = x.transpose(1, 2)  # (B, N, C) -> 每个格子作为一个序列元素
-        x = self.proj_to_transformer(x)  # (B, N, d_model)
+        # 3. 转换为Transformer输入格式
+        x = x.flatten(2).transpose(1, 2)
+        x = self.proj_to_transformer(x)
 
         # 4. 叠加位置编码 + Transformer
-        x = self.pos_encoder(x)  # 叠加位置信息
-        x = self.transformer_encoder(x)  # (B, N, d_model)，输出全局特征
-
-        # 5. 策略头输出：(B, N) -> 每个位置的落子概率，仅返回这一项与V2保持一致
-        policy_logits = self.policy_head(x).squeeze(-1)  # (B, N)
+        x = self.pos_encoder(x)
+        transformer_output = self.transformer_encoder(x)
         
-        # 确保输出形状与V2完全一致：(batch_size, board_size*board_size)
-        return policy_logits
+        # 5. 策略头输出
+        policy_logits = self.policy_head(transformer_output).squeeze(-1)
+        
+        # 6. 价值头输出
+        value_input = transformer_output.flatten(1)
+        value = self.value_head(value_input)
+        
+        # 返回两个输出
+        return policy_logits, value.squeeze(-1)
 
-def get_valid_action(logits, board, epsilon=0.1):
-    board_size = board.shape[0]
-    logits = logits.flatten()
-    valid_actions = [(logits[i].item(), i) for i in range(board_size * board_size) if board[i // board_size, i % board_size] == 0]
-    valid_actions.sort(reverse=True, key=lambda x: x[0])
+def get_valid_action(logits, board_flat, board_size, epsilon=0.1):
+    # 优化后的探索策略
+    valid_mask = (board_flat == 0)
+    valid_indices = torch.where(valid_mask)[0]
+    if valid_indices.numel() == 0:
+        return -1
+
+    # logits 已经被 flatten()，它是一个一维张量。
+    logits = logits.cpu().flatten()
+    valid_indices = valid_indices.cpu() 
+    
+    valid_logits = logits[valid_indices]
+    
+    # 贪心选择
+    greedy_action = valid_indices[torch.argmax(valid_logits)]
+
     if random.random() < epsilon:
-        return random.choice(valid_actions)[1] if valid_actions else -1
+        # 探索模式
+        # 优先在相邻位置中选择，如果没找到，则在所有空位中选择
+        adjacent_actions = []
+        board_cpu = board_flat.cpu().reshape(board_size, board_size)
+        
+        for idx in valid_indices:
+            x, y = idx // board_size, idx % board_size
+            if is_adjacent_to_piece(board_cpu, x, y, board_size):
+                adjacent_actions.append(idx)
+        
+        if adjacent_actions and random.random() < 0.9: # 90%的概率在相邻位置探索
+            return random.choice(adjacent_actions)
+        else: # 10%的概率在所有空位中探索
+            return random.choice(valid_indices)
     else:
-        return valid_actions[0][1] if valid_actions else -1
+        # 利用模式
+        return greedy_action
+
+def is_adjacent_to_piece(board, x, y, board_size):
+    """检查(x,y)位置是否与已有棋子相邻（8个方向）"""
+    # 8个方向：上、下、左、右、四个对角线
+    directions = [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
+    for dx, dy in directions:
+        nx, ny = x + dx, y + dy
+        # 检查邻接位置是否在棋盘内且有棋子
+        if 0 <= nx < board_size and 0 <= ny < board_size and board[nx, ny] != 0:
+            return True
+    return False
 
 def load_model_if_exists(model, file_path):
     if os.path.exists(file_path):
