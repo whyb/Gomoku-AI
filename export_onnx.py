@@ -1,7 +1,7 @@
 import os
 import torch
 import argparse
-from model import GomokuNetV2
+from model import GomokuNetV2, GomokuNetV3
 from config import Config, update_config_from_cli
 
 def load_model(model, file_path):
@@ -22,7 +22,7 @@ def export_onnx(model, output_path, board_size):
     model.eval()
     example_input = torch.randn(1, board_size * board_size)
     torch.onnx.export(model, example_input, output_path,
-                      export_params=True, opset_version=10, 
+                      export_params=True, opset_version=17, 
                       do_constant_folding=True, input_names=['input'], 
                       output_names=['output'])
     print(f"ONNX model saved to {output_path}")
@@ -52,7 +52,7 @@ if __name__ == "__main__":
     print(f"===================\n")
 
     # 初始化模型（使用训练时的棋盘尺寸）
-    model = GomokuNetV2(board_size=board_size)
+    model = GomokuNetV3(board_size=board_size)
     load_model(model, args.model_path)
 
     # 处理导出路径（默认路径包含关键参数信息）
@@ -63,6 +63,6 @@ if __name__ == "__main__":
     torchscript_output_path = args.torchscript_path if args.torchscript_path else default_torchscript
 
     # 导出模型
-    export_torchscript(model, torchscript_output_path, board_size)
+    #export_torchscript(model, torchscript_output_path, board_size)
     export_onnx(model, onnx_output_path, board_size)
     
