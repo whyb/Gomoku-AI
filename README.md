@@ -45,8 +45,8 @@ python train.py --board_size 5 --win_condition 5
 # 8x8棋盘，连5子胜利
 python train.py --board_size 8 --win_condition 5
 
-# 10x10棋盘，连5子胜利
-python train.py --board_size 10 --win_condition 5
+# 15x15棋盘，连5子胜利
+python train.py --board_size 15 --win_condition 5
 
 ```
 
@@ -210,11 +210,10 @@ python export_onnx.py gobang_best_model.pth --board_size 5 --win_condition 5
 # 自定义输出路径
 python export_onnx.py gobang_best_model.pth \
   --board_size 5 --win_condition 5 \
-  --onnx_path ./output/model_5x5.onnx \
-  --torchscript_path ./output/model_5x5.pt
+  --onnx_path ./webdemo/model_bs5_win5.onnx
 
 ```
-执行成功后，会在output目录产生`model_5x5.pt`、`model_5x5.onnx`两个文件
+执行成功后，会在webdemo目录产生`model_5x5.pt`、`model_5x5.onnx`两个文件
 
 ### 打印棋盘
 
