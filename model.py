@@ -10,16 +10,24 @@ from config import Config
 
 # 游戏环境
 class Gomoku:
-    def __init__(self, board_size=None, win_condition=None):
+    def __init__(self, board_size=None, win_condition=None, device='cpu'):
         self.board_size = board_size or Config.BOARD_SIZE
         self.win_condition = win_condition or Config.WIN_CONDITION
-        self.board = np.zeros((self.board_size, self.board_size), dtype=int)
+        self.board = torch.zeros((self.board_size, self.board_size), dtype=torch.int, device=device)
         self.current_player = 1
         self.winning_line = []
         self.step_count = 0
+        self.device = device
 
     def reset(self):
         self.board.fill(0)
+        self.current_player = 1
+        self.winning_line = []
+        self.step_count = 0
+        return self.board
+    
+    def reset_torch(self):
+        self.board.fill_(0)
         self.current_player = 1
         self.winning_line = []
         self.step_count = 0
@@ -55,6 +63,25 @@ class Gomoku:
             if count + 1 >= self.win_condition:
                 self.winning_line = [(x, y)] + line
                 return True
+        return False
+    
+    def is_winning_move_torch(self, x, y):
+        player = self.board[x, y].item()
+        board_padded = F.pad(self.board.unsqueeze(0).unsqueeze(0), (self.win_condition-1, self.win_condition-1, self.win_condition-1, self.win_condition-1), mode='constant', value=0)
+        board_padded = board_padded.squeeze()
+        px, py = x + self.win_condition-1, y + self.win_condition-1
+        # 横向
+        if (board_padded[px, py-(self.win_condition-1):py+self.win_condition].eq(player).sum().item() >= self.win_condition):
+            return True
+        # 纵向
+        if (board_padded[px-(self.win_condition-1):px+self.win_condition, py].eq(player).sum().item() >= self.win_condition):
+            return True
+        # 主对角线
+        if (torch.diag(board_padded, offset=py-px).eq(player).sum().item() >= self.win_condition):
+            return True
+        # 副对角线
+        if (torch.diag(torch.fliplr(board_padded), offset=self.board_size+self.win_condition-2-(px+py)).eq(player).sum().item() >= self.win_condition):
+            return True
         return False
 
     def calculate_reward(self, x, y):
@@ -113,6 +140,68 @@ class Gomoku:
             total_reward += Config.REWARD["block_win"]
 
         return total_reward
+    
+    def calculate_reward_torch(self, x, y):
+        player = self.board[x, y].item()
+        opponent = 3 - player
+        board = self.board
+        
+        total_reward = 0
+        live_counts = torch.zeros(5, dtype=torch.int, device=self.device)
+        rush_counts = torch.zeros(5, dtype=torch.int, device=self.device)
+        
+        directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
+        
+        for dx, dy in directions:
+            count = 1
+            forward_blocked = False
+            backward_blocked = False
+
+            # 正向计数
+            for step in range(1, self.win_condition):
+                nx, ny = x + dx * step, y + dy * step
+                if 0 <= nx < self.board_size and 0 <= ny < self.board_size and board[nx, ny] == player:
+                    count += 1
+                else:
+                    if 0 <= nx < self.board_size and 0 <= ny < self.board_size and board[nx, ny] == opponent:
+                        forward_blocked = True
+                    break
+            
+            # 反向计数
+            for step in range(1, self.win_condition):
+                nx, ny = x - dx * step, y - dy * step
+                if 0 <= nx < self.board_size and 0 <= ny < self.board_size and board[nx, ny] == player:
+                    count += 1
+                else:
+                    if 0 <= nx < self.board_size and 0 <= ny < self.board_size and board[nx, ny] == opponent:
+                        backward_blocked = True
+                    break
+            
+            if count >= 2:
+                if not forward_blocked and not backward_blocked:
+                    live_counts[min(count, 4)] += 1
+                elif forward_blocked != backward_blocked:
+                    rush_counts[min(count, 4)] += 1
+        
+        # 复合棋形奖励
+        if live_counts[3] >= 2: total_reward += Config.REWARD["双活三"]
+        if rush_counts[4] >= 1 and live_counts[3] >= 1: total_reward += Config.REWARD["冲四活三"]
+        
+        # 单独棋形奖励
+        total_reward += live_counts[2].item() * Config.REWARD["live2"]
+        total_reward += live_counts[3].item() * Config.REWARD["live3"]
+        total_reward += live_counts[4].item() * Config.REWARD["live4"]
+        total_reward += rush_counts[2].item() * Config.REWARD["冲2"]
+        total_reward += rush_counts[3].item() * Config.REWARD["冲3"]
+        total_reward += rush_counts[4].item() * Config.REWARD["冲4"]
+
+        # 检查是否阻断对手胜利
+        temp_board = board.clone()
+        temp_board[x, y] = opponent
+        if self._is_winning_move(temp_board, x, y, opponent):
+            total_reward += Config.REWARD["block_win"]
+
+        return total_reward
 
     def _is_winning_move(self, board, x, y, player):
         # 内部辅助函数：检查指定棋盘上的落子是否胜利
@@ -156,11 +245,35 @@ class Gomoku:
         self.current_player = 3 - self.current_player
         return self.board[x, y], False, reward
     
+    def step_torch(self, action):
+        action_idx = action.item()
+        x, y = action_idx // self.board_size, action_idx % self.board_size
+        if self.board[x, y] != 0:
+            return torch.tensor(-1, device=self.device), True, torch.tensor(0.0, device=self.device)
+            
+        self.board[x, y] = self.current_player
+        self.step_count += 1
+
+        if self.is_winning_move(x, y):
+            reward = torch.tensor(Config.REWARD["win"], dtype=torch.float32, device=self.device)
+            return torch.tensor(self.current_player, device=self.device), True, reward
+        
+        reward = self.calculate_reward_torch(x, y)
+        reward_tensor = torch.tensor(reward, dtype=torch.float32, device=self.device)
+        
+        self.current_player = 3 - self.current_player
+        return torch.tensor(self.board[x, y], device=self.device), False, reward_tensor
+    
     def get_state_representation(self):
         # 多通道输入表示
         player1_board = (self.board == 1).astype(np.float32)
         player2_board = (self.board == 2).astype(np.float32)
         return np.stack([player1_board, player2_board], axis=0) # 形状: (2, board_size, board_size)
+    
+    def get_state_representation_torch(self):
+        player1_board = (self.board == 1).float()
+        player2_board = (self.board == 2).float()
+        return torch.stack([player1_board, player2_board], dim=0)
 
     def print_board(self):
         """打印当前棋盘状态，用 X 表示玩家1，O 表示玩家2，. 表示空位"""
@@ -370,6 +483,42 @@ def get_valid_action(logits, board_flat, board_size, epsilon=0.1):
         # 利用模式
         return greedy_action
 
+def get_valid_action_torch(logits, board_flat, board_size, epsilon=0.1):
+    valid_mask = (board_flat == 0)
+    valid_indices = torch.where(valid_mask)[0]
+    
+    if valid_indices.numel() == 0:
+        return torch.tensor(-1, device=logits.device)
+    
+    logits = logits.flatten()
+    valid_logits = logits[valid_indices]
+    
+    # 贪心选择
+    greedy_action_idx = torch.argmax(valid_logits)
+    greedy_action = valid_indices[greedy_action_idx]
+
+    # 使用PyTorch张量进行随机探索
+    if torch.rand(1) < epsilon:
+        # 创建一个和棋盘大小一样的张量，用于快速检查相邻位置
+        board_2d = board_flat.reshape(board_size, board_size)
+        adjacent_mask = is_adjacent_to_piece_torch(board_2d, board_size)
+        
+        # 筛选出相邻的有效落子位置
+        adjacent_actions_mask = adjacent_mask.flatten()[valid_indices]
+        adjacent_actions = valid_indices[adjacent_actions_mask]
+        
+        if adjacent_actions.numel() > 0 and torch.rand(1) < 0.9:
+            # 在相邻位置中随机选择
+            random_idx = torch.randint(0, adjacent_actions.size(0), (1,))
+            return adjacent_actions[random_idx]
+        else:
+            # 在所有有效位置中随机选择
+            random_idx = torch.randint(0, valid_indices.size(0), (1,))
+            return valid_indices[random_idx]
+    else:
+        # 利用模式
+        return greedy_action
+
 def is_adjacent_to_piece(board, x, y, board_size):
     """检查(x,y)位置是否与已有棋子相邻（8个方向）"""
     # 8个方向：上、下、左、右、四个对角线
@@ -380,6 +529,13 @@ def is_adjacent_to_piece(board, x, y, board_size):
         if 0 <= nx < board_size and 0 <= ny < board_size and board[nx, ny] != 0:
             return True
     return False
+
+def is_adjacent_to_piece_torch(board, board_size):
+    # 使用卷积来检查相邻位置，完全在GPU上运行
+    board_float = (board != 0).float().unsqueeze(0).unsqueeze(0)
+    kernel = torch.ones(1, 1, 3, 3, device=board.device)
+    conv_result = F.conv2d(board_float, kernel, padding=1).squeeze()
+    return (conv_result > 0)
 
 def load_model_if_exists(model, file_path):
     if os.path.exists(file_path):
