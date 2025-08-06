@@ -13,7 +13,10 @@ class Gomoku:
     def __init__(self, board_size=None, win_condition=None, device='cpu'):
         self.board_size = board_size or Config.BOARD_SIZE
         self.win_condition = win_condition or Config.WIN_CONDITION
-        self.board = torch.zeros((self.board_size, self.board_size), dtype=torch.int, device=device)
+        if device=='cpu':
+            self.board = np.zeros((self.board_size, self.board_size), dtype=int)
+        else:
+            self.board = torch.zeros((self.board_size, self.board_size), dtype=torch.int, device=device)
         self.current_player = 1
         self.winning_line = []
         self.step_count = 0

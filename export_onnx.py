@@ -6,8 +6,9 @@ from config import Config, update_config_from_cli
 
 def load_model(model, file_path):
     if os.path.exists(file_path):
-        model.load_state_dict(torch.load(file_path))
-        print(f"Loaded model weights from {file_path}")
+        state_dict = torch.load(file_path, map_location='cpu')
+        model.load_state_dict(state_dict)
+        print(f"Loaded model weights from {file_path} to CPU.")
     else:
         raise FileNotFoundError(f"No saved model weights found at {file_path}")
 
@@ -68,10 +69,10 @@ if __name__ == "__main__":
     torchscript_output_path = args.torchscript_path if args.torchscript_path else default_torchscript
 
     # 导出模型
-    #if args.torchscript_path:
-    #    export_torchscript(model, torchscript_output_path, board_size)
     if args.onnx_path:
         export_onnx(model, onnx_output_path, board_size)
+    if args.torchscript_path:
+        export_torchscript(model, torchscript_output_path, board_size)
     # 如果没有指定任何路径，则同时导出两种格式
     if not args.torchscript_path and not args.onnx_path:
         export_onnx(model, onnx_output_path, board_size)
