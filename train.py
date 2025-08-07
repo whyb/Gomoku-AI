@@ -1,6 +1,7 @@
 import math
 import random
 import torch
+#import torch_directml
 import torch.nn as nn
 import torch.optim as optim
 import argparse
@@ -11,17 +12,26 @@ import time
 from model import Gomoku, GomokuNetV3, get_valid_action, load_model_if_exists, is_adjacent_to_piece
 from config import Config, update_config_from_cli
 
-CPU_PARALLEL_ENVS = 8
-GPU_PARALLEL_ENVS = 4
-STEPS_PER_ENV = 20
-CPU_BATCH_SIZE = 256
-GPU_BATCH_SIZE = 128
+CPU_PARALLEL_ENVS = 0
+GPU_PARALLEL_ENVS = 8
+CPU_BATCH_SIZE = 128
+GPU_BATCH_SIZE = 512
 
 def get_device_config():
     use_cuda = torch.cuda.is_available()
     main_device = torch.device("cuda" if use_cuda else "cpu")
     print(f"[初始化] 主设备: {main_device} | 支持CUDA: {use_cuda}")
     return main_device, use_cuda
+
+# def get_device_config2():
+#     index = 1
+#     use_dml = torch_directml.is_available()
+#     if use_dml:
+#         for i in range(torch_directml.device_count()):
+#             print("[", i, "]", torch_directml.device_name(i))
+#     main_device = torch_directml.device(index) if use_dml else torch.device("cpu")
+#     print(f"[初始化] 主设备: {torch_directml.device_name(index)} | 支持DML: {use_dml}")
+#     return main_device, use_dml
 
 def setup_players_and_optimizers(device, board_size):
     model1 = GomokuNetV3(board_size).to(device)
@@ -42,6 +52,7 @@ def get_dynamic_epsilon(steps_taken, total_cells, min_epsilon=0.05):
 def env_worker(env_id, board_size, win_condition, model_queue, experience_queue, total_cells, device_type):
     env = Gomoku(board_size, win_condition)
     device = torch.device("cuda" if device_type == "gpu" else "cpu")
+    #device, use_cuda = get_device_config2()
     
     local_model1 = GomokuNetV3(board_size).to(device)
     local_model2 = GomokuNetV3(board_size).to(device)
@@ -75,6 +86,7 @@ def env_worker(env_id, board_size, win_condition, model_queue, experience_queue,
         first_player = random.choice([1, 2])
         env.current_player = first_player
 
+        STEPS_PER_ENV = env.board_size * env.board_size #每个并行游戏环境env最多执行的落子步数上限
         while not done and total_steps < STEPS_PER_ENV:
             state = env.get_state_representation()
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
@@ -92,8 +104,36 @@ def env_worker(env_id, board_size, win_condition, model_queue, experience_queue,
             
             current_player = env.current_player
             next_player, done, reward = env.step(action)
-            episode_experience.append((state_tensor.cpu().detach(), action, reward, current_player))
+            # 处理胜利时的奖励（区分普通奖励和胜利奖励）
+            if done:
+                # 胜利时的reward是元组：(基础win奖励, 落子步数)
+                base_win_reward, step_count = reward
+                # 计算速度奖励：棋盘总格子数 - 实际步数（步数越少，奖励越高）
+                total_cells = env.board_size * env.board_size
+                speed_bonus = (total_cells - step_count) * Config.SPEED_REWARD_COEFFICIENT
+                # 总胜利奖励 = 基础奖励 + 速度奖励
+                final_reward = base_win_reward + speed_bonus
+                episode_experience.append((state_tensor.cpu().detach(), action, final_reward, current_player))
+            else:
+                # 普通奖励直接记录
+                episode_experience.append((state_tensor.cpu().detach(), action, reward, current_player))
             total_steps += 1
+
+        # 处理失败方的惩罚（随步数增加而加重）
+        if done:
+            winner = env.current_player
+            loser = 3 - winner  # 确定失败方
+            # 失败惩罚 = 基础惩罚 + 步数×惩罚系数（步数越多，惩罚越重）
+            base_lose_penalty = Config.REWARD["lose"]
+            step_based_penalty = total_steps * Config.LOSE_STEP_PENALTY  # 每步增加的惩罚
+            total_lose_penalty = base_lose_penalty + step_based_penalty
+
+            # 遍历经验列表，更新失败方的所有步骤奖励
+            for i in range(len(episode_experience)):
+                state, action, reward, player = episode_experience[i]
+                if player == loser:
+                    # 失败方的每一步都叠加总失败惩罚（强化“拖延必败”的信号）
+                    episode_experience[i] = (state, action, total_lose_penalty, player)
 
         if episode_experience:
             experience_queue.put({
@@ -145,10 +185,12 @@ def train():
 
     main_device, use_cuda = get_device_config()
     batch_size = GPU_BATCH_SIZE if main_device.type == 'cuda' else CPU_BATCH_SIZE
+    #main_device, use_cuda = get_device_config2()
+    #batch_size = GPU_BATCH_SIZE
     
     REPLAY_BUFFER_SIZE = 30000
     UPDATE_FREQ = 4
-    PRINT_INTERVAL = 500
+    PRINT_INTERVAL = 50
     HISTORY_POOL_SIZE = 3
     total_cells = config.BOARD_SIZE * config.BOARD_SIZE
     
@@ -289,7 +331,7 @@ def train():
                 loss2, _ = update_model_batch(model2, optimizer2, policy_criterion, value_criterion, batch2, main_device)
                 update_steps += 1
             
-            if total_episodes % PRINT_INTERVAL == 0 and total_episodes > 0:
+            if (total_episodes % PRINT_INTERVAL) == 0 and total_episodes > 0:
                 total_win_rate1 = (total_win1 / total_episodes * 100 if total_episodes else 0)
                 first1_rate = (first_player1_wins / total_first1 * 100 if total_first1 else 0)
                 first2_rate = (first_player2_wins / total_first2 * 100 if total_first2 else 0)
@@ -300,7 +342,7 @@ def train():
                     print(f"  损失值: P1: {loss1:.4f} / P2: {loss2:.4f}")
                 print("  ------------------------")
 
-            if total_episodes % config.SAVE_INTERVAL == 0 and total_episodes > 0:
+            if (total_episodes % config.SAVE_INTERVAL) == 0 and total_episodes > 0:
                 torch.save(model1.state_dict(), f'gobang_model_player1_{total_episodes}.pth')
                 history_pool.append(deepcopy(model1))
                 print(f"[历史池更新] 已保存第 {total_episodes} 局模型，当前池大小: {len(history_pool)}")
