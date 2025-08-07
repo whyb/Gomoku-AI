@@ -57,8 +57,181 @@ class Gomoku:
                 return True
         return False
 
+    def _detect_double_live3(self, player, x, y):
+        """检测是否形成两个独立的活3"""
+        directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
+        live3_info = []  # 存储活3的方向和涉及的棋子位置
+        opponent = 3 - player
+
+        for dx, dy in directions:
+            # 计算当前方向的连珠及两端状态
+            count = 1
+            stones = [(x, y)]  # 记录当前连珠涉及的棋子
+            forward_empty = False
+            backward_empty = False
+
+            # 正向检查
+            nx, ny = x + dx, y + dy
+            while 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[nx, ny] == player:
+                count += 1
+                stones.append((nx, ny))
+                nx += dx
+                ny += dy
+            if 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[nx, ny] == 0:
+                forward_empty = True
+
+            # 反向检查
+            nx, ny = x - dx, y - dy
+            while 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[nx, ny] == player:
+                count += 1
+                stones.append((nx, ny))
+                nx -= dx
+                ny -= dy
+            if 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[nx, ny] == 0:
+                backward_empty = True
+
+            # 活3判定：连珠数=3，且两端均为空（完全开放）
+            if count == 3 and forward_empty and backward_empty:
+                live3_info.append({"dir": (dx, dy), "stones": set(stones)})
+
+        # 检查是否有两个不共子的活3（不同方向）
+        if len(live3_info) >= 2:
+            for i in range(len(live3_info)):
+                for j in range(i + 1, len(live3_info)):
+                    # 两个活3的棋子集合无交集（不共子）
+                    if live3_info[i]["stones"].isdisjoint(live3_info[j]["stones"]):
+                        print(f"检测到双活3: ({x},{y})，玩家{player}")
+                        return True
+        return False
+    
+    def _detect_rush4_live3(self, player, x, y):
+        """检测是否形成独立的冲4和活3组合"""
+        directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
+        rush4_dirs = []  # 存储冲4的方向和棋子
+        live3_dirs = []  # 存储活3的方向和棋子
+        opponent = 3 - player
+
+        for dx, dy in directions:
+            # 计算连珠数及两端状态
+            count = 1
+            stones = [(x, y)]
+            forward_empty = False
+            backward_empty = False
+            forward_blocked = False
+            backward_blocked = False
+
+            # 正向检查
+            nx, ny = x + dx, y + dy
+            while 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[nx, ny] == player:
+                count += 1
+                stones.append((nx, ny))
+                nx += dx
+                ny += dy
+            if 0 <= nx < self.board_size and 0 <= ny < self.board_size:
+                if self.board[nx, ny] == 0:
+                    forward_empty = True
+                elif self.board[nx, ny] == opponent:
+                    forward_blocked = True
+
+            # 反向检查
+            nx, ny = x - dx, y - dy
+            while 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[nx, ny] == player:
+                count += 1
+                stones.append((nx, ny))
+                nx -= dx
+                ny -= dy
+            if 0 <= nx < self.board_size and 0 <= ny < self.board_size:
+                if self.board[nx, ny] == 0:
+                    backward_empty = True
+                elif self.board[nx, ny] == opponent:
+                    backward_blocked = True
+
+            # 冲4判定：连珠数=4，且仅一端被阻挡（半开放）
+            if count == 4 and (forward_empty != backward_empty):
+                rush4_dirs.append({"dir": (dx, dy), "stones": set(stones)})
+
+            # 活3判定：连珠数=3，两端均为空（完全开放）
+            if count == 3 and forward_empty and backward_empty:
+                live3_dirs.append({"dir": (dx, dy), "stones": set(stones)})
+
+        # 检查是否存在独立的冲4和活3（不同方向且不共子）
+        for rush4 in rush4_dirs:
+            for live3 in live3_dirs:
+                # 方向不同且棋子无交集
+                if rush4["dir"] != live3["dir"] and rush4["stones"].isdisjoint(live3["stones"]):
+                    print(f"检测到冲4活3: ({x},{y})，玩家{player}")
+                    return True
+        return False
+
+    def _detect_double_rush4(self, player, x, y):
+        """检测是否形成双冲四：同一玩家在不同方向有两处冲四，且需不同防守点"""
+        directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
+        rush4_dirs = []  # 存储冲四的方向及防守点
+        opponent = 3 - player
+
+        for dx, dy in directions:
+            # 计算当前方向的连珠数量
+            count = 1
+            forward_empty = False
+            backward_empty = False
+            forward_blocked = False
+            backward_blocked = False
+
+            # 正向检查
+            nx, ny = x + dx, y + dy
+            while 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[nx, ny] == player:
+                count += 1
+                nx += dx
+                ny += dy
+            # 正向端点状态（空/阻挡）
+            if 0 <= nx < self.board_size and 0 <= ny < self.board_size:
+                if self.board[nx, ny] == 0:
+                    forward_empty = True
+                elif self.board[nx, ny] == opponent:
+                    forward_blocked = True
+
+            # 反向检查
+            nx, ny = x - dx, y - dy
+            while 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[nx, ny] == player:
+                count += 1
+                nx -= dx
+                ny -= dy
+            # 反向端点状态（空/阻挡）
+            if 0 <= nx < self.board_size and 0 <= ny < self.board_size:
+                if self.board[nx, ny] == 0:
+                    backward_empty = True
+                elif self.board[nx, ny] == opponent:
+                    backward_blocked = True
+
+            # 冲四判定：连珠数=4，且只有一端被阻挡（另一端为空）
+            if count == 4:
+                if (forward_empty and backward_blocked) or (backward_empty and forward_blocked):
+                    # 记录防守点（被阻挡的反方向为空位）
+                    defense_pos = (nx, ny) if backward_empty else (x + dx * (count), y + dy * (count))
+                    rush4_dirs.append((dx, dy, defense_pos))
+
+        # 去重方向（避免相反方向重复计算，如(1,0)和(-1,0)视为同一方向）
+        unique_rush4 = []
+        seen_dirs = set()
+        for dir_info in rush4_dirs:
+            dx, dy, pos = dir_info
+            # 用绝对值表示方向（如(1,0)和(-1,0)都记为(1,0)）
+            key = (abs(dx), abs(dy))
+            if key not in seen_dirs:
+                seen_dirs.add(key)
+                unique_rush4.append(dir_info)
+
+        # 双冲四：至少2个不同方向的冲四，且防守点不同
+        if len(unique_rush4) >= 2:
+            defenses = [info[2] for info in unique_rush4]
+            # 检查防守点是否不同（避免同一位置防守两个冲四）
+            if len(set(defenses)) >= 2:
+                print(f"检测到双冲4: ({x},{y})，玩家{player}")
+                return True
+        return False
+
     def calculate_reward(self, x, y):
-        # 细化奖励计算，并考虑复合棋形
+        # 细化奖励计算
         player = self.board[x, y]
         opponent = 3 - player
         directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
@@ -66,6 +239,7 @@ class Gomoku:
         live_counts = {2: 0, 3: 0, 4: 0}
         rush_counts = {2: 0, 3: 0, 4: 0}
 
+        # 棋形计数逻辑
         for dx, dy in directions:
             count = 1
             forward_blocked = False
@@ -96,17 +270,25 @@ class Gomoku:
                     live_counts[min(count, 4)] += 1
                 elif forward_blocked != backward_blocked: # 只有一端被阻挡
                     rush_counts[min(count, 4)] += 1
+
+        # 双活3奖励
+        if self._detect_double_live3(player, x, y):
+            total_reward += Config.REWARD["双活3"]
         
-        # 复合棋形奖励
-        if live_counts[3] >= 2: total_reward += Config.REWARD["双活三"]
-        if rush_counts[4] >= 1 and live_counts[3] >= 1: total_reward += Config.REWARD["冲四活三"]
+        # 冲4活3奖励
+        if self._detect_rush4_live3(player, x, y):
+            total_reward += Config.REWARD["冲4活3"]
+        
+        # 双冲四奖励（高于单冲四，低于冲4活3）
+        if self._detect_double_rush4(player, x, y):
+            total_reward += Config.REWARD["双冲4"]
         
         # 单独棋形奖励
         for num in range(2, 5):
             total_reward += live_counts[num] * Config.REWARD[f"live{num}"]
             total_reward += rush_counts[num] * Config.REWARD[f"冲{num}"]
 
-        # 检查是否阻断对手胜利 (逻辑不变)
+        # 阻断对手胜利奖励
         temp_board = self.board.copy()
         temp_board[x, y] = opponent
         if self._is_winning_move(temp_board, x, y, opponent):
@@ -115,7 +297,7 @@ class Gomoku:
         return total_reward
 
     def _is_winning_move(self, board, x, y, player):
-        # 内部辅助函数：检查指定棋盘上的落子是否胜利
+        # 内部辅助函数
         directions = [(1, 0), (0, 1), (1, 1), (1, -1)]
         for dx, dy in directions:
             count = 1
@@ -144,10 +326,12 @@ class Gomoku:
         self.board[x, y] = self.current_player
         self.step_count += 1
 
-        # 胜利奖励
+        # 胜利/失败奖惩逻辑
         if self.is_winning_move(x, y):
-            reward = Config.REWARD["win"]
-            return self.current_player, True, reward
+            winner = self.current_player
+            loser = 3 - winner
+            # 给获胜方奖励，失败方惩罚
+            return winner, True, Config.REWARD["win"]
         
         # 计算连珠奖励
         reward = self.calculate_reward(x, y)
@@ -300,7 +484,7 @@ class GomokuNetV3(nn.Module):
             nn.Linear(64, 1)
         )
         
-        # 6. 价值头：预测当前局面的胜率（新增）
+        # 6. 价值头：预测当前局面的胜率
         self.value_head = nn.Sequential(
             nn.Linear(d_model * self.n, 256),
             nn.ReLU(),
