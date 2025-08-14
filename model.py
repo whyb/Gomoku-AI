@@ -564,7 +564,7 @@ def get_valid_action(logits, board_flat, board_size, epsilon=0.1):
 
     # logits 已经被 flatten()，它是一个一维张量
     logits = logits.cpu().flatten()
-    valid_indices = valid_indices.cpu() 
+    valid_indices = valid_indices.cpu()
     
     valid_logits = logits[valid_indices]
     

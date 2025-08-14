@@ -174,7 +174,7 @@ def update_model_batch(model, optimizer, policy_criterion, value_criterion, batc
     states, actions, rewards = zip(*batch)
     states = torch.cat(states).to(device)
     actions = torch.tensor(actions, device=device)
-    rewards = torch.tensor(rewards, device=device, dtype=torch.float32).unsqueeze(1) # 增加的一个维度，匹配价值头的输出
+    rewards = torch.tensor(rewards, device=device, dtype=torch.float32)
 
     # 获取策略和价值预测
     logits, values = model(states)
@@ -190,7 +190,7 @@ def update_model_batch(model, optimizer, policy_criterion, value_criterion, batc
     # 2. 策略损失
     # CrossEntropyLoss 期望的 target 是整数类型的索引
     policy_loss_per_action = policy_criterion(logits, actions)
-    policy_loss = (policy_loss_per_action * -advantage.squeeze()).mean()
+    policy_loss = (policy_loss_per_action * -advantage).mean()
     
     # 3. 价值损失：让价值网络去预测环境奖励
     value_loss = value_criterion(values, rewards)
