@@ -13,9 +13,9 @@ from model import Gomoku, GomokuNetV3, get_valid_action, load_model_if_exists, i
 from config import Config, update_config_from_cli
 
 CPU_PARALLEL_ENVS = 0
-GPU_PARALLEL_ENVS = 8
+GPU_PARALLEL_ENVS = 6
 CPU_BATCH_SIZE = 128
-GPU_BATCH_SIZE = 512
+GPU_BATCH_SIZE = 256
 
 def get_device_config():
     use_cuda = torch.cuda.is_available()
@@ -86,7 +86,7 @@ def env_worker(env_id, board_size, win_condition, model_queue, experience_queue,
         first_player = random.choice([1, 2])
         env.current_player = first_player
 
-        STEPS_PER_ENV = env.board_size * env.board_size * 0.75 #每个并行游戏环境env最多执行的落子步数上限
+        STEPS_PER_ENV = env.board_size * env.board_size * 0.85 #每个并行游戏环境env最多执行的落子步数上限
         while not done and total_steps < STEPS_PER_ENV:
             state = env.get_state_representation()
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
@@ -144,7 +144,7 @@ def env_worker(env_id, board_size, win_condition, model_queue, experience_queue,
                 'winner': env.current_player if done else 0
             })
 
-def update_model_batch(model, optimizer, policy_criterion, value_criterion, batch, device):
+def update_model_batch_old(model, optimizer, policy_criterion, value_criterion, batch, device):
     states, actions, rewards = zip(*batch)
     states = torch.cat(states).to(device)
     actions = torch.tensor(actions, device=device)
@@ -170,6 +170,40 @@ def update_model_batch(model, optimizer, policy_criterion, value_criterion, batc
     
     return loss.item(), rewards.mean().item()
 
+def update_model_batch(model, optimizer, policy_criterion, value_criterion, batch, device):
+    states, actions, rewards = zip(*batch)
+    states = torch.cat(states).to(device)
+    actions = torch.tensor(actions, device=device)
+    rewards = torch.tensor(rewards, device=device, dtype=torch.float32).unsqueeze(1) # 增加的一个维度，匹配价值头的输出
+
+    # 获取策略和价值预测
+    logits, values = model(states)
+    
+    # 策略损失：使用价值网络的预测值作为奖励信号
+    # values 是模型预测的当前局面价值，用它来指导策略梯度
+    # rewards 是环境的奖励，它只用于训练价值网络
+    # 注意：使用 detach() 来阻止梯度流回价值网络，确保策略和价值网络独立训练
+    
+    # 1. 计算优势（Advantage）
+    advantage = values.detach()
+    
+    # 2. 策略损失
+    # CrossEntropyLoss 期望的 target 是整数类型的索引
+    policy_loss_per_action = policy_criterion(logits, actions)
+    policy_loss = (policy_loss_per_action * -advantage.squeeze()).mean()
+    
+    # 3. 价值损失：让价值网络去预测环境奖励
+    value_loss = value_criterion(values, rewards)
+
+    # 4. 总损失
+    loss = policy_loss + value_loss
+    
+    optimizer.zero_grad()
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    optimizer.step()
+    
+    return loss.item(), rewards.mean().item()
 
 def train():
     try:
@@ -199,7 +233,15 @@ def train():
     replay_buffer1 = deque(maxlen=REPLAY_BUFFER_SIZE)
     replay_buffer2 = deque(maxlen=REPLAY_BUFFER_SIZE)
     
-    load_model_if_exists(model1, 'gobang_best_model.pth')
+    model_loaded = load_model_if_exists(model1, 'gobang_best_model.pth')
+
+    # 如果加载成功，将 model1 的权重复制给 model2
+    if model_loaded:
+        model2.load_state_dict(model1.state_dict())
+        print("[初始化] model1 和 model2 已加载 'gobang_best_model.pth' 文件。")
+    else:
+        print("[初始化] 未找到 'gobang_best_model.pth'，model1 和 model2 将使用随机初始权重。")
+
     best_model = GomokuNetV3(config.BOARD_SIZE).to(main_device)
     best_model.load_state_dict(model1.state_dict())
     history_pool.append(deepcopy(best_model))
@@ -264,6 +306,7 @@ def train():
     total_first1 = 0
     total_first2 = 0
     update_steps = 0
+    last_save_step = 0
     cpu_episodes = 0
     gpu_episodes = 0
     start_time = time.time()
@@ -342,10 +385,11 @@ def train():
                     print(f"  损失值: P1: {loss1:.4f} / P2: {loss2:.4f}")
                 print("  ------------------------")
 
-            if (total_episodes % config.SAVE_INTERVAL) == 0 and total_episodes > 0:
-                torch.save(model1.state_dict(), f'gobang_model_player1_{total_episodes}.pth')
+            if (update_steps - last_save_step) >= config.SAVE_INTERVAL and update_steps > 0:
+                filename = f'gobang_model_player1_step_{update_steps}.pth'
+                torch.save(model1.state_dict(), filename)
                 history_pool.append(deepcopy(model1))
-                print(f"[历史池更新] 已保存第 {total_episodes} 局模型，当前池大小: {len(history_pool)}")
+                print(f"[历史池更新] 已保存第 {update_steps} 步模型，当前池大小: {len(history_pool)}")
                 
                 if history_pool:
                     # 玩家2更新逻辑：从历史池中随机选择一个模型作为陪练
@@ -355,6 +399,7 @@ def train():
                 best_model.load_state_dict(model1.state_dict())
                 send_model_params()
                 print(f"[模型保存] 第 {total_episodes} 局模型已保存")
+                last_save_step = update_steps
     finally:
         for p in processes: p.terminate()
         torch.save(model1.state_dict(), 'gobang_best_model.pth')

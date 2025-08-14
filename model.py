@@ -606,5 +606,7 @@ def load_model_if_exists(model, file_path):
     if os.path.exists(file_path):
         model.load_state_dict(torch.load(file_path))
         print(f"Loaded model weights from {file_path}")
+        return True
     else:
         print(f"No saved model weights found at {file_path}")
+        return False
