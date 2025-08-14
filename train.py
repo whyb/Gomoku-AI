@@ -86,7 +86,7 @@ def env_worker(env_id, board_size, win_condition, model_queue, experience_queue,
         first_player = random.choice([1, 2])
         env.current_player = first_player
 
-        STEPS_PER_ENV = env.board_size * env.board_size * 0.85 #每个并行游戏环境env最多执行的落子步数上限
+        STEPS_PER_ENV = env.board_size * env.board_size * 1 #每个并行游戏环境env最多执行的落子步数上限
         while not done and total_steps < STEPS_PER_ENV:
             state = env.get_state_representation()
             state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
@@ -144,7 +144,7 @@ def env_worker(env_id, board_size, win_condition, model_queue, experience_queue,
                 'winner': env.current_player if done else 0
             })
 
-def update_model_batch_old(model, optimizer, policy_criterion, value_criterion, batch, device):
+def update_model_batch(model, optimizer, policy_criterion, value_criterion, batch, device):
     states, actions, rewards = zip(*batch)
     states = torch.cat(states).to(device)
     actions = torch.tensor(actions, device=device)
@@ -170,7 +170,7 @@ def update_model_batch_old(model, optimizer, policy_criterion, value_criterion, 
     
     return loss.item(), rewards.mean().item()
 
-def update_model_batch(model, optimizer, policy_criterion, value_criterion, batch, device):
+def update_model_batch_new(model, optimizer, policy_criterion, value_criterion, batch, device):
     states, actions, rewards = zip(*batch)
     states = torch.cat(states).to(device)
     actions = torch.tensor(actions, device=device)
