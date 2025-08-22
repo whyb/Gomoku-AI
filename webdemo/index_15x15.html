@@ -150,6 +150,12 @@
                 boardElement.appendChild(cell);
             }
         }
+
+        function getPolicyColor(value, min, max) {
+            const ratio = (value - min) / (max - min + 1e-6);  // 范围归一化
+            const alpha = 0.1 + ratio * 0.6;  // 从 0.1 到 0.7 的透明度
+            return `rgba(0, 128, 0, ${alpha})`;  // 绿色通道透明叠加
+        }
         
         // 处理玩家点击
         function handleCellClick(index) {
@@ -198,6 +204,7 @@
                             }
                         }
                     }
+
                     let firstMove = 0;
                     if (emptyPositions.length > 0) {
                         const randomIndex = Math.floor(Math.random() * emptyPositions.length);
@@ -274,6 +281,21 @@
                 statusElement.className = 'game-message text-primary';
                 gameState.currentPlayer = 1;
                 gameState.isAIMoving = false;
+
+                const minLogit = Math.min(...policyOutput);
+                const maxLogit = Math.max(...policyOutput);
+
+                // 更新格子颜色
+                const cells = boardElement.querySelectorAll('.board-cell');
+                cells.forEach((cell, i) => {
+                    if (gameState.board[i] === 0) {
+                        cell.style.backgroundColor = getPolicyColor(policyOutput[i], minLogit, maxLogit);
+                    } else if(i == bestMove) {
+                        cell.style.backgroundColor = getPolicyColor(policyOutput[i], minLogit, maxLogit);
+                    } else {
+                        cell.style.backgroundColor = '';  // 清除已落子格的着色
+                    }
+                });
                 
             } catch (error) {
                 console.error('AI落子出错:', error);
@@ -375,6 +397,10 @@
                 statusElement.innerHTML = '<i class="fa fa-user mr-2"></i>轮到你落子';
                 statusElement.className = 'game-message text-primary';
             }
+            const cells = boardElement.querySelectorAll('.board-cell');
+            cells.forEach(cell => {
+                cell.style.backgroundColor = ''; // 恢复原始背景色
+            });
         }
         
         // 加载ONNX模型 (已更新，适配15x15棋盘)
@@ -412,6 +438,7 @@
             initializeBoard();
             loadModel();
         });
+
     </script>
 </body>
 </html>
