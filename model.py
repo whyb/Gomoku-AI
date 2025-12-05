@@ -604,9 +604,14 @@ def is_adjacent_to_piece(board, x, y, board_size):
 
 def load_model_if_exists(model, file_path):
     if os.path.exists(file_path):
-        model.load_state_dict(torch.load(file_path))
-        print(f"Loaded model weights from {file_path}")
-        return True
+        try:
+            state = torch.load(file_path, map_location=torch.device('cpu'))
+            model.load_state_dict(state)
+            print(f"Loaded model weights from {file_path}")
+            return True
+        except Exception as e:
+            print(f"Failed to load model from {file_path}: {e}")
+            return False
     else:
         print(f"No saved model weights found at {file_path}")
         return False
