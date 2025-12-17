@@ -5,7 +5,7 @@ class Config:
     WIN_CONDITION = 5  # 胜利条件（连珠数）
     
     # 训练参数
-    LEARNING_RATE = 1e-3 # 0.001
+    LEARNING_RATE = 9e-2 # 0.001
     # 动态学习率调度参数
     LR_MIN = 3e-5
     LR_WARMUP_STEPS = 10000
