@@ -4,16 +4,20 @@ import random
 import time
 import argparse
 import math
+import numpy as np
 from collections import deque
 from copy import deepcopy
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
 
 from model import Gomoku, get_valid_action
 from model_dy import GomokuNetDyn, load_model_if_exists
 from config import Config, update_config_from_cli
+from mcts import MCTS
 
 _BASE_DIR = os.path.dirname(__file__)
 _ANOTHER_DIR = os.path.join(_BASE_DIR, 'another')
@@ -22,10 +26,111 @@ if _ANOTHER_DIR not in sys.path:
 import Alpha_beta_optimize as ai_player
 import Global_variables as gv
 
-CPU_PARALLEL_ENVS = 16
-GPU_PARALLEL_ENVS = 4
+CPU_PARALLEL_ENVS = 0
+GPU_PARALLEL_ENVS = 16
 CPU_BATCH_SIZE = 128
 GPU_BATCH_SIZE = 512
+
+class AlphaZeroLoss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.value_criterion = nn.MSELoss()
+
+    def forward(self, policy_logits, value, target_pis, target_vs):
+        """
+        policy_logits: 网络输出的策略 (batch, 225) - 未经过 softmax
+        value: 网络输出的胜率 (batch, 1) or (batch)
+        target_pis: MCTS 搜索得到的概率分布 (batch, 225)
+        target_vs: 真实游戏结果 (batch)
+        """
+        # 1. Value Loss (MSE)
+        value_loss = self.value_criterion(value.view(-1), target_vs.view(-1))
+
+        # 2. Policy Loss (Cross Entropy with Soft Targets)
+        # 公式: - sum( target_pi * log(predicted_pi) )
+        log_probs = F.log_softmax(policy_logits, dim=1)
+        policy_loss = -torch.mean(torch.sum(target_pis * log_probs, dim=1))
+
+        # 总损失
+        total_loss = policy_loss + value_loss
+        return total_loss, policy_loss.item(), value_loss.item()
+
+# --- 高效 Replay Buffer (List + Swap Remove) ---
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.buffer = []
+        self.capacity = capacity
+
+    def push(self, item):
+        self.buffer.append(item)
+        # 如果超出容量，移除最早的元素 (FIFO)，保持缓冲区大小合理
+        # 注意：在当前逻辑中，数据被采样后即移除，capacity 主要作为安全上限
+        if len(self.buffer) > self.capacity:
+            self.buffer.pop(0)
+
+    def sample_and_remove(self, batch_size):
+        """
+        随机采样 batch_size 个元素并从 buffer 中移除。
+        使用 索引交换 (Swap) 的方式避免列表中间删除带来的 O(N) 开销。
+        """
+        batch = []
+        count = min(len(self.buffer), batch_size)
+        for _ in range(count):
+            # 随机选择一个索引
+            idx = random.randint(0, len(self.buffer) - 1)
+            # 将选中元素与最后一个元素交换
+            self.buffer[idx], self.buffer[-1] = self.buffer[-1], self.buffer[idx]
+            # 弹出最后一个元素（即刚才选中的元素）
+            batch.append(self.buffer.pop())
+        return batch
+
+    def __len__(self):
+        return len(self.buffer)
+
+# ---  DataLoader 辅助类 ---
+class BatchDataset(Dataset):
+    def __init__(self, data_list):
+        self.data = data_list
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        return self.data[idx]
+
+def collate_fn(batch):
+    """
+    自定义 batch 整理函数：将 list of tuples 转换为堆叠后的 Tensor
+    """
+    # 此时 batch 的结构是 [(state, probs, reward), ...]
+    states, target_pis, rewards = zip(*batch)
+    
+    states = torch.cat(states) # (Batch, 2, 15, 15)
+    
+    # 将 numpy 数组列表转为 Tensor
+    target_pis = torch.tensor(np.array(target_pis), dtype=torch.float32) # (Batch, 225)
+    
+    # 奖励转为 Tensor
+    rewards = torch.tensor(rewards, dtype=torch.float32)
+    
+    return states, target_pis, rewards
+
+def alpha_zero_loss(policy_logits, value, target_pis, target_vs):
+    """
+    policy_logits: 网络输出 (未经过 softmax)
+    target_pis: MCTS 搜索后的分布
+    value: 网络输出的胜率预测
+    target_vs: 最终真实结果 (胜+1, 负-1)
+    """
+    # 1. 策略损失：KL 散度 (相当于 soft-target cross entropy)
+    # log_softmax + (target * log_probs)
+    log_probs = F.log_softmax(policy_logits, dim=1)
+    policy_loss = -torch.mean(torch.sum(target_pis * log_probs, dim=1))
+    
+    # 2. 价值损失：MSE
+    value_loss = F.mse_loss(value.view(-1), target_vs)
+    
+    return policy_loss + value_loss
 
 def get_device_config():
     use_cuda = torch.cuda.is_available()
@@ -65,6 +170,11 @@ def env_worker(env_id, board_size, win_condition, model_queue, experience_queue,
     local_model = GomokuNetDyn().to(device)
     local_model.eval()
     latest_global_episodes = 0
+    
+    # 初始化 MCTS
+    # 15x15 棋盘，训练时 playout 大概设置为 200-400 之间
+    mcts_playout = 300 if board_size >= 15 else 200
+    mcts = MCTS(local_model, c_puct=5, n_playout=mcts_playout, board_size=board_size)
 
     while True:
         try:
@@ -81,6 +191,8 @@ def env_worker(env_id, board_size, win_condition, model_queue, experience_queue,
             reset_another_ai(board_size, env.board)
             done = False
             total_steps = 0
+            p1_step_count = 0 
+            p2_step_count = 0 
             episode_experience = []
             first_player = random.choice([1, 2])
             env.current_player = first_player
@@ -88,52 +200,71 @@ def env_worker(env_id, board_size, win_condition, model_queue, experience_queue,
             STEPS_PER_ENV = env.board_size * env.board_size
             while not done and total_steps < STEPS_PER_ENV:
                 state = env.get_state_representation()
+                # 保持原逻辑：在此处转为 Tensor，放入队列
                 state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
 
+                # --- 被训练 AI (Player 1) 逻辑 ---
                 if env.current_player == 1:
-                    with torch.no_grad():
-                        logits, _ = local_model(state_tensor)
-                    board_flat = torch.tensor(env.board.flatten(), device=device)
-                    eps = linear_schedule(Config.EPSILON1_START, Config.EPSILON1_END, latest_global_episodes, Config.EPSILON_DECAY)
-                    action = get_valid_action(logits, board_flat, board_size, epsilon=eps)
+                    # --- AlphaZero 核心逻辑 ---
+                    # 温度参数控制：前期探索大(temp=1)，后期趋向确定的策略(temp->0)
+                    temp = 1.0 if len(episode_experience) < 10 else 0.5 # 比如前10步比较随机
+                    
+                    # 获取 MCTS 概率分布 (mcts_probs 是长度为 225 的 numpy array)
+                    action, mcts_probs = mcts.get_move_probs(env, temp=temp)
+                
+                # --- 陪练 AI (Player 2) 逻辑 ---
                 else:
-                    reset_another_ai(board_size, env.board)
-                    strong_prob = linear_schedule(Config.OPP_STRONG_PROB_START, Config.OPP_STRONG_PROB_END, latest_global_episodes, Config.OPP_STRONG_DECAY)
-                    random_prob = linear_schedule(Config.OPP_RANDOM_PROB_START, Config.OPP_RANDOM_PROB_END, latest_global_episodes, Config.OPP_RANDOM_DECAY)
-                    r = random.random()
-                    if r < random_prob:
-                        valid_actions = [i * board_size + j for i in range(board_size) for j in range(board_size) if env.board[i][j] == 0]
-                        action = random.choice(valid_actions) if valid_actions else -1
+                    p2_step_count += 1
+                    if p2_step_count == 1: 
+                        valid_actions = [i for i in range(total_cells) if env.board.flatten()[i] == 0]
+                        action = random.choice(valid_actions)
                     else:
-                        level = '比你6的Level' if r < (random_prob + strong_prob) else '和我一样6的Level'
-                        pos = ai_player.machine_thinking(level)
-                        if not pos:
-                            valid_actions = [i * board_size + j for i in range(board_size) for j in range(board_size) if env.board[i][j] == 0]
+                        reset_another_ai(board_size, env.board)
+                        strong_prob = linear_schedule(Config.OPP_STRONG_PROB_START, Config.OPP_STRONG_PROB_END, latest_global_episodes, Config.OPP_STRONG_DECAY)
+                        random_prob = linear_schedule(Config.OPP_RANDOM_PROB_START, Config.OPP_RANDOM_PROB_END, latest_global_episodes, Config.OPP_RANDOM_DECAY)
+                        
+                        r = random.random()
+                        if r < random_prob:
+                            valid_actions = [i for i in range(total_cells) if env.board.flatten()[i] == 0]
                             action = random.choice(valid_actions) if valid_actions else -1
                         else:
-                            i, j = pos
-                            action = i * board_size + j
+                            level = '比你6的Level' if r < (random_prob + strong_prob) else '和我一样6的Level'
+                            pos = ai_player.machine_thinking(level)
+                            if not pos:
+                                valid_actions = [i for i in range(total_cells) if env.board.flatten()[i] == 0]
+                                action = random.choice(valid_actions) if valid_actions else -1
+                            else:
+                                i, j = pos
+                                action = i * board_size + j
+                    
+                    # 构造陪练的 one-hot 分布。
+                    # 虽然我们主要训练 P1，但如果你也要训练 P2，这里也需要存储分布
+                    mcts_probs = np.zeros(total_cells, dtype=np.float32)
+                    if action != -1: 
+                        mcts_probs[action] = 1.0
 
                 current_player = env.current_player
                 next_player, done, reward = env.step(action)
+                
+                # --- 核心存储修改：存储 mcts_probs 而不是 action ---
                 if done:
                     base_win_reward, step_count = reward
                     speed_bonus = Config.SPEED_REWARD_COEFFICIENT * (total_cells - step_count)
                     final_reward = base_win_reward + speed_bonus
-                    episode_experience.append((state_tensor.cpu().detach(), action, final_reward, current_player))
+                    # 将 action 替换为 mcts_probs
+                    episode_experience.append((state_tensor.cpu().detach(), mcts_probs, final_reward, current_player))
                 else:
-                    episode_experience.append((state_tensor.cpu().detach(), action, reward, current_player))
+                    # 将 action 替换为 mcts_probs
+                    episode_experience.append((state_tensor.cpu().detach(), mcts_probs, reward, current_player))
+
                 total_steps += 1
 
             if done:
-                # 为失败方添加一个终局惩罚，但只加在失败方的最后一步上，
-                # 同时保留中间步骤的棋形奖励，方便后续计算蒙特卡洛回报。
                 winner = env.current_player
                 loser = 3 - winner
                 base_lose_penalty = Config.REWARD["lose"]
                 step_based_penalty = Config.LOSE_STEP_PENALTY * env.step_count
                 total_lose_penalty = base_lose_penalty + step_based_penalty
-                # 找到失败方最后一步并加上惩罚
                 last_idx = None
                 for idx in range(len(episode_experience) - 1, -1, -1):
                     if episode_experience[idx][3] == loser:
@@ -153,7 +284,6 @@ def env_worker(env_id, board_size, win_condition, model_queue, experience_queue,
                         'winner': env.current_player if done else 0
                     })
                 except Exception as e:
-                    # 若队列提交失败，把错误消息发回主进程
                     try:
                         experience_queue.put({'env_id': env_id, 'error': f'提交经验失败: {e}'})
                     except Exception:
@@ -165,27 +295,23 @@ def env_worker(env_id, board_size, win_condition, model_queue, experience_queue,
                 experience_queue.put({'env_id': env_id, 'error': f'子进程异常: {e}\n{tb}'})
             except Exception:
                 pass
-            # 发生未捕获异常时退出子进程循环
             return
 
-def update_model_batch(model, optimizer, policy_criterion, value_criterion, batch, device):
-    states, actions, rewards = zip(*batch)
-    states = torch.cat(states).to(device)
-    actions = torch.tensor(actions, device=device, dtype=torch.long)
-    rewards = torch.tensor(rewards, device=device, dtype=torch.float32)
-    logits, values = model(states)
-    # CrossEntropyLoss returns per-sample loss; multiply by return (can be negative)
-    policy_loss = (policy_criterion(logits, actions) * rewards).mean()
-    # Ensure values shape matches rewards
-    if values.dim() > 1:
-        values = values.view(-1)
-    value_loss = value_criterion(values, rewards)
-    loss = policy_loss + value_loss
+
+
+def update_model_batch(model, optimizer, criterion, states, target_pis, rewards):
+    model.train()
+    policy_logits, values = model(states)
+    
+    # 调用我们新定义的 AlphaZeroLoss
+    loss, loss_pi, loss_v = criterion(policy_logits, values, target_pis, rewards)
+    
     optimizer.zero_grad()
     loss.backward()
     torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     optimizer.step()
-    return loss.item(), rewards.mean().item()
+    
+    return loss.item(), loss_pi, loss_v
 
 def train():
     try:
@@ -217,11 +343,12 @@ def train():
     best_model.load_state_dict(model.state_dict())
     history_pool = deque([deepcopy(best_model)], maxlen=3)
 
-    policy_criterion = nn.CrossEntropyLoss(reduction='none')
-    value_criterion = nn.MSELoss()
+    #policy_criterion = nn.CrossEntropyLoss(reduction='none')
+    criterion = AlphaZeroLoss()
+    # value_criterion is integrated into AlphaZeroLoss
 
-    # 回放缓冲区——长期保留，跨批次复用经验
-    replay_buffer1 = deque(maxlen=REPLAY_BUFFER_SIZE)
+    # --- 使用高效的自定义 Replay Buffer ---
+    replay_buffer1 = ReplayBuffer(capacity=REPLAY_BUFFER_SIZE)
     GAMMA = 0.99
 
     def lr_lambda(step):
@@ -255,7 +382,6 @@ def train():
             total_envs += 1
 
     print(f"[并行初始化] 启动 {total_envs} 个并行游戏环境")
-    # 打印子进程状态以便诊断
     for p in processes:
         print(f"  子进程: {getattr(p, 'name', 'proc')} alive={p.is_alive()}")
 
@@ -309,18 +435,15 @@ def train():
                 gpu_diff = gpu_episodes - last_gpu_episodes
                 speed = episodes_diff / time_diff if time_diff > 0 else 0
                 print(f"[速度统计] 过去 {time_diff:.1f} 秒完成 {episodes_diff} 局 | 平均速度: {speed:.2f} 局/秒")
-                # 打印子进程存活信息，帮助判断是否有子进程异常退出
                 alive_count = sum(1 for p in processes if p.is_alive())
                 if alive_count != total_envs:
                     print(f"[警告] 当前存活子进程: {alive_count}/{total_envs}")
-                # 检查队列中是否有错误信息
                 try:
                     while not experience_queue.empty():
                         msg = experience_queue.get_nowait()
                         if isinstance(msg, dict) and 'error' in msg:
                             print(f"[子进程错误] {msg.get('env_id')}: {msg.get('error')}")
                         else:
-                            # 如果不是错误消息，把它放回队列以便后续处理
                             experience_queue.put(msg)
                             break
                 except Exception:
@@ -332,18 +455,17 @@ def train():
                 last_cpu_episodes = cpu_episodes
                 last_gpu_episodes = gpu_episodes
 
-            # 持续消费经验队列（每次循环尽可能多读入新经验）
+            # 消费经验
             while not experience_queue.empty():
                 try:
                     exp_data = experience_queue.get_nowait()
                 except Exception:
                     break
-                # 如果子进程回传错误消息，打印并跳过
                 if isinstance(exp_data, dict) and 'error' in exp_data and 'experiences' not in exp_data:
                     print(f"[子进程消息] {exp_data.get('env_id')}: {exp_data.get('error')}")
                     continue
 
-                episode_exps = exp_data.get('experiences', [])  # 单局按顺序经验列表
+                episode_exps = exp_data.get('experiences', [])
                 if not episode_exps:
                     continue
                 winner = exp_data.get('winner', 0)
@@ -376,7 +498,7 @@ def train():
                 else:
                     gpu_episodes += 1
 
-                # 计算蒙特卡洛回报（从后向前累积）并加入长期回放缓冲区
+                # 计算蒙特卡洛回报
                 returns = []
                 G = 0.0
                 for s, a, r, p in reversed(episode_exps):
@@ -386,41 +508,53 @@ def train():
 
                 for s, a, G, p in returns:
                     if p == 1:
-                        replay_buffer1.append((s, a, G))
+                        # 直接 push 到新的 List-based buffer
+                        replay_buffer1.push((s, a, G))
                     else:
                         try:
                             s_swapped = s.clone()
                             s_swapped[:, 0:1, :, :] = s[:, 1:2, :, :]
                             s_swapped[:, 1:2, :, :] = s[:, 0:1, :, :]
-                            replay_buffer1.append((s_swapped, a, G))
+                            replay_buffer1.push((s_swapped, a, G))
                         except Exception:
                             pass
 
-            # 如果回放缓冲区不足以训练，则短暂等待并继续循环
             if len(replay_buffer1) < batch_size:
                 time.sleep(0.01)
                 continue
 
+            # --- 从 Buffer 中高效采样并使用 DataLoader 处理数据 ---
+            # 1. 高效采样 (O(1) 移除)
+            batch_data = replay_buffer1.sample_and_remove(batch_size)
+            
+            # 2. 包装为 Dataset 并使用 DataLoader
+            # num_workers=0 表示在主进程处理，避免频繁 spawn 子进程开销，
+            # 但 pin_memory=True 可以让数据传输到 GPU 异步非阻塞
+            train_loader = DataLoader(
+                BatchDataset(batch_data), 
+                batch_size=batch_size, 
+                shuffle=False, # 数据在 buffer 采样时已经是随机的
+                collate_fn=collate_fn, 
+                pin_memory=use_cuda
+            )
+
             loss1 = None
-            # 从回放缓冲区采样一批用于训练，并从缓冲区中移除被采样的数据，保证新经验被持续消费
-            buf_list = list(replay_buffer1)
-            random.shuffle(buf_list)
-            batch1 = buf_list[:batch_size]
-            remaining = buf_list[batch_size:]
-            replay_buffer1 = deque(remaining, maxlen=REPLAY_BUFFER_SIZE)
-            loss1, _ = update_model_batch(model, optimizer, policy_criterion, value_criterion, batch1, main_device)
+            # DataLoader 循环（此处只会执行一次，因为 batch_size 等于 loader 大小）
+            for states, actions, rewards in train_loader:
+                # 异步传输数据到 GPU
+                states = states.to(main_device, non_blocking=True)
+                actions = actions.to(main_device, non_blocking=True)
+                rewards = rewards.to(main_device, non_blocking=True)
+                
+                loss1, loss_pi, loss_v = update_model_batch(model, optimizer, criterion, states, actions, rewards)
+            
             scheduler.step()
             update_steps += 1
 
             if (total_episodes % PRINT_INTERVAL) == 0 and total_episodes > 0:
-                # 计算各种率
                 win_rate1 = (total_win1 / total_episodes * 100)
-                
-                # AI先手情况下的统计
                 f1_win_rate = (first_player1_wins / total_first1 * 100 if total_first1 else 0)
                 f1_draw_rate = (first_player1_draws / total_first1 * 100 if total_first1 else 0)
-                
-                # 陪练先手情况下的统计 (陪练的胜率)
                 f2_win_rate = (first_player2_wins / total_first2 * 100 if total_first2 else 0)
                 f2_draw_rate = (first_player2_draws / total_first2 * 100 if total_first2 else 0)
 
@@ -465,4 +599,3 @@ def train():
 
 if __name__ == "__main__":
     train()
-

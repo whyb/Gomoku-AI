@@ -39,6 +39,9 @@ class Gomoku:
         self.reward_log = {1: {'count': 0, 'rewards': {}}, 2: {'count': 0, 'rewards': {}}} # 清空奖励记录
         return self.board
 
+    def is_game_over(self):
+        return len(self.winning_line) > 0 or self.step_count >= self.board_size * self.board_size
+
     def is_winning_move(self, x, y):
         # 检查胜利条件
         def count_consecutive(player, dx, dy):

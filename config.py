@@ -5,19 +5,19 @@ class Config:
     WIN_CONDITION = 5  # 胜利条件（连珠数）
     
     # 训练参数
-    LEARNING_RATE = 9e-2 # 0.001
+    LEARNING_RATE = 9.9e-3 # 0.001
     # 动态学习率调度参数
     LR_MIN = 3e-5
     LR_WARMUP_STEPS = 10000
     LR_DECAY_STEPS = 300000
     # 探索率配置
-    EPSILON1_START = 0.9   # Player1初始探索率
-    EPSILON1_END = 0.05    # Player1最终探索率
+    EPSILON1_START = 0.33 #0.9   # Player1初始探索率
+    EPSILON1_END = 0.05 #0.05    # Player1最终探索率
     EPSILON2_START = 0.9   # Player2初始探索率
     EPSILON2_END = 0.1     # Player2最终探索率
     EPSILON_DECAY = 200000  # 探索率按总局数线性衰减
     SAVE_INTERVAL = 5000  # 模型保存间隔
-    MAX_EPISODES = 90000000  # 最大训练回合数
+    MAX_EPISODES = 10000000  # 最大训练回合数
     
     # 奖励配置 (新增复合棋形奖励)
     REWARD = {
@@ -44,11 +44,11 @@ class Config:
     LOSE_STEP_PENALTY = 0.05  # 每多走一步，失败惩罚随步数增加
 
     # 陪练难度混合（从易到难）
-    OPP_STRONG_PROB_START = 0.3
-    OPP_STRONG_PROB_END = 0.9
+    OPP_STRONG_PROB_START = 0.99 #0.3
+    OPP_STRONG_PROB_END = 1.0 #0.9
     OPP_STRONG_DECAY = 200000
-    OPP_RANDOM_PROB_START = 0.4
-    OPP_RANDOM_PROB_END = 0.05
+    OPP_RANDOM_PROB_START = 0.005 #0.4
+    OPP_RANDOM_PROB_END = 0.00005 #0.05
     OPP_RANDOM_DECAY = 200000
     
 
