@@ -2,8 +2,8 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>五子棋人机对战 (8x8棋盘)</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>五子棋AI</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.14.0/dist/ort.min.js"></script>
@@ -13,15 +13,11 @@
             theme: {
                 extend: {
                     colors: {
-                        primary: '#8B5CF6',
-                        secondary: '#EC4899',
-                        board: '#EAB308',
-                        player1: '#1E40AF',
-                        player2: '#DC2626',
-                    },
-                    fontFamily: {
-                        sans: ['Inter', 'system-ui', 'sans-serif'],
-                    },
+                        primary: '#2C3E50',
+                        secondary: '#E67E22',
+                        wood: '#DDBB8E',
+                        line: '#855E42',
+                    }
                 }
             }
         }
@@ -29,416 +25,375 @@
     
     <style type="text/tailwindcss">
         @layer utilities {
-            .board-cell {
-                @apply w-6 h-6 md:w-8 md:h-8 border-2 border-amber-800 flex items-center justify-center cursor-pointer transition-all duration-200 hover:bg-amber-300/50;
+            .board-wrapper {
+                @apply relative w-full aspect-square bg-wood shadow-2xl rounded-sm;
+                max-width: min(90vw, 600px);
+                margin: 0 auto;
             }
+            .grid-container {
+                @apply absolute inset-0;
+                padding: 3.3333%; 
+                display: grid;
+                grid-template-columns: repeat(14, 1fr);
+                grid-template-rows: repeat(14, 1fr);
+            }
+            .grid-cell { @apply border-l border-t border-line; }
+            .grid-cell-right { @apply border-r border-line; }
+            .grid-cell-bottom { @apply border-b border-line; }
+
+            .interaction-layer {
+                @apply absolute inset-0 z-10;
+                display: grid;
+                grid-template-columns: repeat(15, 1fr);
+                grid-template-rows: repeat(15, 1fr);
+            }
+
+            .intersect-point {
+                @apply flex items-center justify-center cursor-pointer relative;
+                -webkit-tap-highlight-color: transparent;
+            }
+
             .piece {
-                @apply w-5 h-5 md:w-7 md:h-7 rounded-full transition-all duration-300 transform scale-0 opacity-0;
+                @apply rounded-full shadow-lg transform scale-0 transition-transform duration-200 z-10;
+                width: 80%;
+                height: 80%;
             }
-            .piece-visible {
-                @apply scale-100 opacity-100;
+            .piece-black { background: radial-gradient(circle at 30% 30%, #444, #000); }
+            .piece-white { background: radial-gradient(circle at 30% 30%, #fff, #ccc); }
+            .piece-visible { @apply scale-100; }
+            
+            .last-move-cursor {
+                @apply absolute inset-0 border-2 border-red-400/60 rounded-sm pointer-events-none z-20;
+                box-shadow: 0 0 4px rgba(248, 113, 113, 0.6);
+                animation: pulse-border 1.5s infinite;
             }
-            .game-message {
-                @apply text-xl font-bold mb-4 transition-all duration-500;
-            }
-            .grid-cols-15 {
-                grid-template-columns: repeat(8, minmax(0, 1fr));
+
+            @keyframes pulse-border {
+                0% { opacity: 0.4; transform: scale(0.95); }
+                50% { opacity: 1; transform: scale(1.05); }
+                100% { opacity: 0.4; transform: scale(0.95); }
             }
         }
     </style>
 </head>
-<body class="bg-gradient-to-br from-gray-50 to-gray-100 min-h-screen flex flex-col items-center justify-center p-4 font-sans">
-    <div class="max-w-4xl w-full bg-white rounded-xl shadow-lg overflow-hidden">
-        <div class="bg-gradient-to-r from-primary to-secondary text-white p-4 text-center">
-            <h1 class="text-2xl font-bold">五子棋人机对战</h1>
-            <p class="text-sm opacity-90">8x8 棋盘 | 先连成5子获胜</p>
-        </div>
-        
-        <div class="p-4 text-center">
-            <div id="status" class="game-message text-primary">
-                <i class="fa fa-robot mr-2"></i>AI先行，准备落子...
-            </div>
-            <div class="flex justify-center items-center gap-4 mt-2">
-                <div class="flex items-center">
-                    <div class="w-4 h-4 rounded-full bg-player1 mr-2"></div>
-                    <span>玩家</span>
-                </div>
-                <div class="flex items-center">
-                    <div class="w-4 h-4 rounded-full bg-player2 mr-2"></div>
-                    <span>AI</span>
-                </div>
-            </div>
-
-            <div class="p-4 flex justify-center gap-3">
-                <button id="restart" class="bg-primary hover:bg-primary/90 text-white px-4 py-2 rounded-lg transition-all flex items-center">
-                    <i class="fa fa-refresh mr-2"></i>重新开始
-                </button>
-                <button id="info" class="bg-gray-200 hover:bg-gray-300 text-gray-800 px-4 py-2 rounded-lg transition-all flex items-center">
-                    <i class="fa fa-info-circle mr-2"></i>规则
-                </button>
-
-                <div class="p-4 flex justify-center gap-3">
-                    <input type="checkbox" id="aiFirst" class="w-4 h-4 text-primary bg-gray-100 border-gray-300 rounded focus:ring-primary" checked>
-                    <label for="aiFirst" class="text-sm cursor-pointer select-none">AI先手</label>
-                </div>
-            </div>
-        </div>
-        
-        <div class="p-4 flex justify-center">
-            <div id="board" class="bg-board rounded-lg p-2 grid grid-cols-15 gap-1"></div>
-        </div>
-        
-        <div id="loading" class="p-4 text-center hidden">
-            <div class="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
-            <p class="mt-2 text-gray-600">加载AI模型中...</p>
-        </div>
-    </div>
+<body class="bg-[#F4F1EA] min-h-screen flex flex-col items-center py-6 px-4 font-sans text-primary">
     
-    <div id="infoModal" class="fixed inset-0 bg-black/50 flex items-center justify-center p-4 hidden">
-        <div class="bg-white rounded-lg p-6 max-w-md w-full">
-            <h3 class="text-xl font-bold text-primary mb-3">游戏规则</h3>
-            <ul class="list-disc pl-5 space-y-2">
-                <li>这是一个8x8棋盘的五子棋游戏</li>
-                <li>使用残差网络（ResNet）作为核心神经网络核心，有效学习棋局特征。</li>
-                <li>玩家使用蓝色棋子，AI使用红色棋子</li>
-                <li>率先在横、竖或斜方向连成5子者获胜</li>
-                <li>点击棋盘落子，点击"重新开始"可以重置游戏</li>
-                <li><a href="https://github.com/whyb/Gomoku-AI/" target="_blank">项目地址:github.com/whyb/Gomoku-AI</a></li>
-            </ul>
-            <button id="closeInfo" class="mt-4 bg-primary text-white px-4 py-2 rounded-lg w-full">
-                明白了
-            </button>
+    <div class="w-full max-w-[600px] mb-4 flex flex-col gap-4">
+        <div class="flex justify-between items-start px-2">
+            <div>
+                <h1 class="text-2xl md:text-3xl font-serif font-bold tracking-tight">五子棋 <span class="text-secondary font-sans">AI</span></h1>
+                <p class="text-[10px] uppercase tracking-[0.2em] opacity-50 text-line">Professional ResNet Engine</p>
+            </div>
+            <a href="https://github.com/whyb/Gomoku-AI/" target="_blank" class="flex items-center gap-2 bg-white/40 px-3 py-1.5 rounded-full border border-white/60 hover:bg-white/80 transition-all shadow-sm">
+                <i class="fa fa-github text-lg"></i>
+                <span class="text-xs font-bold hidden sm:inline">关于本项目</span>
+            </a>
+        </div>
+        
+        <div class="flex justify-between items-center bg-white/60 backdrop-blur-sm p-3 rounded-xl shadow-sm border border-white/40">
+            <div class="flex gap-4">
+                <div class="flex items-center gap-2">
+                    <div class="w-4 h-4 rounded-full piece-black shadow-sm"></div>
+                    <span class="text-xs font-bold">玩家</span>
+                </div>
+                <div class="flex items-center gap-2">
+                    <div class="w-4 h-4 rounded-full piece-white shadow-sm"></div>
+                    <span class="text-xs font-bold">AI</span>
+                </div>
+            </div>
+            <div class="flex items-center gap-3">
+                <label class="flex items-center cursor-pointer gap-2">
+                    <input type="checkbox" id="aiFirst" class="w-4 h-4 rounded border-gray-300 text-secondary focus:ring-secondary" checked>
+                    <span class="text-[11px] font-medium">AI先手</span>
+                </label>
+                <div class="h-4 w-px bg-gray-300 mx-1"></div>
+                <button id="restart" class="bg-primary text-white text-[11px] px-3 py-1.5 rounded-lg hover:bg-secondary transition-colors shadow-sm">
+                    重置游戏
+                </button>
+            </div>
+        </div>
+        
+        <div id="status" class="text-center text-xs font-bold tracking-widest text-secondary uppercase animate-pulse">
+            正在初始化引擎...
         </div>
     </div>
-    <a href="https://github.com/whyb/Gomoku-AI/" target="_blank" class="mt-4 text-gray-500 hover:text-primary transition-colors text-sm flex items-center gap-1">
-        <i class="fa fa-github"></i>
-        <span>本项目GitHub地址</span>
-    </a>
+
+    <div class="board-wrapper">
+        <div id="grid-bg" class="grid-container"></div>
+        <div id="board" class="interaction-layer"></div>
+    </div>
+
+    <div id="resultModal" class="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-6 hidden">
+        <div class="bg-white rounded-2xl p-8 max-w-xs w-full text-center shadow-2xl transform transition-all scale-110">
+            <div id="resultIcon" class="text-5xl mb-4">🏆</div>
+            <h3 id="resultTitle" class="text-2xl font-bold mb-2">恭喜获胜！</h3>
+            <p id="resultMsg" class="text-sm text-gray-500 mb-8">这场对弈非常精彩。</p>
+            <div class="flex flex-col gap-3">
+                <button id="btnPlayAgain" class="w-full bg-secondary text-white py-3 rounded-xl font-bold hover:brightness-110 transition-all shadow-lg">再来一把</button>
+                <button id="btnCloseResult" class="w-full bg-gray-100 text-gray-600 py-3 rounded-xl font-bold hover:bg-gray-200 transition-all">关闭</button>
+                
+                <a href="https://github.com/whyb/Gomoku-AI/" target="_blank" class="mt-2 text-[11px] text-gray-400 hover:text-secondary underline underline-offset-4">
+                    <i class="fa fa-code mr-1"></i>查看开源代码
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <footer class="mt-8 text-[10px] text-gray-400 font-medium tracking-tighter opacity-60">
+        POWERED BY ONNX RUNTIME WEB & TAILWIND CSS
+    </footer>
+
+    <div id="loading" class="fixed inset-0 bg-white/90 z-50 flex flex-col items-center justify-center">
+        <div class="w-12 h-12 border-4 border-secondary border-t-transparent rounded-full animate-spin"></div>
+        <p class="mt-4 text-sm font-bold tracking-widest text-primary/60">AI引擎加载中...</p>
+    </div>
 
     <script>
-        // 游戏状态变量
-        const BOARD_SIZE = 8;
+        const BOARD_SIZE = 15;
         const BOARD_SQUARE = BOARD_SIZE * BOARD_SIZE;
         
         let gameState = {
-            board: Array(BOARD_SQUARE).fill(0), // 0:空, 1:玩家, 2:AI
-            currentPlayer: 2,
+            board: Array(BOARD_SQUARE).fill(0),
             gameOver: false,
             model: null,
             isAIMoving: false,
-            isFirstMove: true
+            lastMove: -1
         };
-        
-        // DOM元素
-        const boardElement = document.getElementById('board');
-        const statusElement = document.getElementById('status');
-        const restartButton = document.getElementById('restart');
-        const infoButton = document.getElementById('info');
-        const infoModal = document.getElementById('infoModal');
-        const closeInfoButton = document.getElementById('closeInfo');
-        const loadingElement = document.getElementById('loading');
-        const aiFirstCheckbox = document.getElementById('aiFirst');
-        
-        // 初始化棋盘
-        function initializeBoard() {
-            boardElement.innerHTML = '';
-            for (let i = 0; i < BOARD_SQUARE; i++) {
+
+        function drawGrid() {
+            const gridContainer = document.getElementById('grid-bg');
+            gridContainer.innerHTML = '';
+            for (let i = 0; i < 14 * 14; i++) {
                 const cell = document.createElement('div');
-                cell.className = 'board-cell';
-                cell.dataset.index = i;
-                cell.addEventListener('click', () => handleCellClick(i));
-                boardElement.appendChild(cell);
+                cell.className = 'grid-cell';
+                if ((i + 1) % 14 === 0) cell.classList.add('grid-cell-right');
+                if (i >= 14 * 13) cell.classList.add('grid-cell-bottom');
+                gridContainer.appendChild(cell);
             }
         }
 
-        function getPolicyColor(value, min, max) {
-            const ratio = (value - min) / (max - min + 1e-6);  // 范围归一化
-            const alpha = 0.1 + ratio * 0.6;  // 从 0.1 到 0.7 的透明度
-            return `rgba(0, 128, 0, ${alpha})`;  // 绿色通道透明叠加
+        function initInteractions() {
+            const board = document.getElementById('board');
+            board.innerHTML = '';
+            for (let i = 0; i < BOARD_SQUARE; i++) {
+                const point = document.createElement('div');
+                point.className = 'intersect-point';
+                point.onclick = () => handleMove(i);
+                board.appendChild(point);
+            }
         }
-        
-        // 处理玩家点击
-        function handleCellClick(index) {
-            if (gameState.gameOver || gameState.board[index] !== 0 || gameState.isAIMoving || gameState.currentPlayer !== 1) {
-                return;
-            }
+
+        function handleMove(index) {
+            if (gameState.gameOver || gameState.board[index] !== 0 || gameState.isAIMoving) return;
             
-            gameState.board[index] = 1;
-            updateBoardUI();
-            
-            if (checkWinner(1)) {
-                gameState.gameOver = true;
-                statusElement.innerHTML = '<i class="fa fa-trophy mr-2"></i>恭喜，你赢了！';
-                statusElement.className = 'game-message text-green-600';
-                return;
-            }
-            
-            if (isBoardFull()) {
-                gameState.gameOver = true;
-                statusElement.innerHTML = '<i class="fa fa-handshake-o mr-2"></i>平局！';
-                statusElement.className = 'game-message text-gray-600';
-                return;
-            }
-            
-            statusElement.innerHTML = '<i class="fa fa-robot mr-2"></i>AI思考中...';
-            statusElement.className = 'game-message text-secondary';
-            gameState.currentPlayer = 2;
+            placePiece(index, 1);
+            if (checkGameOver(1)) return;
+
             gameState.isAIMoving = true;
-            
-            setTimeout(aiMove, 500);
+            document.getElementById('status').innerText = 'AI 正在思考...';
+            setTimeout(aiLogic, 1);
         }
-        
-        // AI落子
-        async function aiMove() {
-            if (gameState.gameOver || gameState.currentPlayer !== 2) return;
+
+        function placePiece(index, player) {
+            gameState.board[index] = player;
+            gameState.lastMove = index;
             
+            const points = document.getElementById('board').children;
+            document.querySelectorAll('.last-move-cursor').forEach(el => el.remove());
+            
+            const piece = document.createElement('div');
+            piece.className = `piece ${player === 1 ? 'piece-black' : 'piece-white'}`;
+            points[index].appendChild(piece);
+            
+            const marker = document.createElement('div');
+            marker.className = 'last-move-cursor';
+            points[index].appendChild(marker);
+            
+            requestAnimationFrame(() => piece.classList.add('piece-visible'));
+        }
+
+        async function aiLogic() {
             try {
-                if (gameState.isFirstMove && aiFirstCheckbox.checked) {
-                    let emptyPositions = [];
+                let bestMove = -1;
+                // AI 开局策略：如果棋盘是空的，下中心
+                if (gameState.board.filter(x => x!==0).length === 0) {
+                    bestMove = 112; 
+                } else {
+                    const input = new Float32Array(BOARD_SQUARE * 2).fill(0);
+                    gameState.board.forEach((val, i) => {
+                        if (val === 1) input[i] = 1;
+                        if (val === 2) input[i + BOARD_SQUARE] = 1;
+                    });
+                    const tensor = new ort.Tensor('float32', input, [1, 2, BOARD_SIZE, BOARD_SIZE]);
+                    const output = await gameState.model.run({ input: tensor });
+                    const logits = output.policy_logits.data;
+                    let maxVal = -Infinity;
                     for (let i = 0; i < BOARD_SQUARE; i++) {
-                        const row = Math.floor(i / BOARD_SIZE);
-                        const col = i % BOARD_SIZE;
-                        if (row > 0 && row < BOARD_SIZE - 1 && col > 0 && col < BOARD_SIZE - 1) {
-                            if (gameState.board[i] === 0) {
-                                emptyPositions.push(i);
-                            }
+                        if (gameState.board[i] === 0 && logits[i] > maxVal) {
+                            maxVal = logits[i];
+                            bestMove = i;
                         }
                     }
-
-                    let firstMove = 0;
-                    if (emptyPositions.length > 0) {
-                        const randomIndex = Math.floor(Math.random() * emptyPositions.length);
-                        firstMove = emptyPositions[randomIndex];
-                    }
-                    
-                    gameState.board[firstMove] = 2;
-                    gameState.isFirstMove = false;
-                    updateBoardUI();
-                    
-                    statusElement.innerHTML = '<i class="fa fa-user mr-2"></i>轮到你落子';
-                    statusElement.className = 'game-message text-primary';
-                    gameState.currentPlayer = 1;
+                }
+                placePiece(bestMove, 2);
+                if (!checkGameOver(2)) {
+                    document.getElementById('status').innerText = '请落子...';
                     gameState.isAIMoving = false;
-                    return;
                 }
-                
-                if (!gameState.model) return;
-                
-                const inputPlayer1 = new Float32Array(BOARD_SQUARE).fill(0);
-                const inputPlayer2 = new Float32Array(BOARD_SQUARE).fill(0);
-                
-                for (let i = 0; i < BOARD_SQUARE; i++) {
-                    if (gameState.board[i] === 1) {
-                        inputPlayer1[i] = 1;
-                    } else if (gameState.board[i] === 2) {
-                        inputPlayer2[i] = 1;
-                    }
-                }
-                
-                const combinedInput = new Float32Array(inputPlayer1.length + inputPlayer2.length);
-                combinedInput.set(inputPlayer1, 0);
-                combinedInput.set(inputPlayer2, inputPlayer1.length);
-                
-                const tensor = new ort.Tensor('float32', combinedInput, [1, 2, BOARD_SIZE, BOARD_SIZE]);
-                const feeds = { input: tensor };
-                
-                const results = await gameState.model.run(feeds);
-                
-                const policyOutput = results.policy_logits.data;
-                
-                let bestScore = -Infinity;
-                let bestMove = -1;
-                
-                for (let i = 0; i < BOARD_SQUARE; i++) {
-                    if (gameState.board[i] === 0 && policyOutput[i] > bestScore) {
-                        bestScore = policyOutput[i];
-                        bestMove = i;
-                    }
-                }
-                
-                if (bestMove !== -1) {
-                    gameState.board[bestMove] = 2;
-                    updateBoardUI();
-                    
-                    if (checkWinner(2)) {
-                        gameState.gameOver = true;
-                        statusElement.innerHTML = '<i class="fa fa-robot mr-2"></i>AI赢了！再接再厉！';
-                        statusElement.className = 'game-message text-secondary';
-                        gameState.isAIMoving = false;
-                        return;
-                    }
-                    
-                    if (isBoardFull()) {
-                        gameState.gameOver = true;
-                        statusElement.innerHTML = '<i class="fa fa-handshake-o mr-2"></i>平局！';
-                        statusElement.className = 'game-message text-gray-600';
-                        gameState.isAIMoving = false;
-                        return;
-                    }
-                }
-                
-                statusElement.innerHTML = '<i class="fa fa-user mr-2"></i>轮到你落子';
-                statusElement.className = 'game-message text-primary';
-                gameState.currentPlayer = 1;
-                gameState.isAIMoving = false;
+            } catch (e) {
+                console.error(e);
+                document.getElementById('status').innerText = 'AI 引擎异常';
+            }
+        }
 
-                const minLogit = Math.min(...policyOutput);
-                const maxLogit = Math.max(...policyOutput);
+        function checkGameOver(player) {
+            const isWin = checkWinner(player);
+            const isDraw = !isWin && gameState.board.every(x => x !== 0);
 
-                // 更新格子颜色
-                const cells = boardElement.querySelectorAll('.board-cell');
-                cells.forEach((cell, i) => {
-                    if (gameState.board[i] === 0) {
-                        cell.style.backgroundColor = getPolicyColor(policyOutput[i], minLogit, maxLogit);
-                    } else if(i == bestMove) {
-                        cell.style.backgroundColor = getPolicyColor(policyOutput[i], minLogit, maxLogit);
+            if (isWin || isDraw) {
+                gameState.gameOver = true;
+                document.getElementById('status').innerText = isWin ? (player === 1 ? '你赢了！' : 'AI 获胜') : '平局';
+                document.getElementById('status').classList.remove('animate-pulse');
+                
+                setTimeout(() => {
+                    const modal = document.getElementById('resultModal');
+                    const title = document.getElementById('resultTitle');
+                    const msg = document.getElementById('resultMsg');
+                    const icon = document.getElementById('resultIcon');
+                    
+                    if (isWin) {
+                        icon.innerText = player === 1 ? '🎉' : '🤖';
+                        title.innerText = player === 1 ? '你太厉害了！' : '哈哈你输了！';
+                        msg.innerText = player === 1 ? '在对阵AI中获得了胜利。' : '继续努力吧！';
                     } else {
-                        cell.style.backgroundColor = '';  // 清除已落子格的着色
+                        icon.innerText = '🤝';
+                        title.innerText = '握手言和';
+                        msg.innerText = '双方棋力相当。';
                     }
-                });
-                
-            } catch (error) {
-                console.error('AI落子出错:', error);
-                statusElement.innerHTML = '<i class="fa fa-exclamation-triangle mr-2"></i>AI出错，请重试';
-                statusElement.className = 'game-message text-red-500';
-                gameState.isAIMoving = false;
+                    modal.classList.remove('hidden');
+                }, 1000);
+                return true;
             }
+            return false;
         }
-        
-        // 更新棋盘UI
-        function updateBoardUI() {
-            const cells = boardElement.querySelectorAll('.board-cell');
-            cells.forEach((cell, index) => {
-                cell.innerHTML = '';
-                
-                if (gameState.board[index] === 1) {
-                    const piece = document.createElement('div');
-                    piece.className = 'piece bg-player1 piece-visible';
-                    cell.appendChild(piece);
-                } else if (gameState.board[index] === 2) {
-                    const piece = document.createElement('div');
-                    piece.className = 'piece bg-player2 piece-visible';
-                    cell.appendChild(piece);
-                }
-            });
-        }
-        
-        // 检查是否有获胜者 (已更新，适配8x8棋盘)
-        function checkWinner(player) {
-            function getIndex(row, col) {
-                return row * BOARD_SIZE + col;
-            }
 
-            for (let row = 0; row < BOARD_SIZE; row++) {
-                for (let col = 0; col < BOARD_SIZE; col++) {
-                    const current = gameState.board[getIndex(row, col)];
-                    if (current !== player) continue;
-
-                    // 检查水平方向
-                    if (col <= BOARD_SIZE - 5 && 
-                        gameState.board[getIndex(row, col + 1)] === player &&
-                        gameState.board[getIndex(row, col + 2)] === player &&
-                        gameState.board[getIndex(row, col + 3)] === player &&
-                        gameState.board[getIndex(row, col + 4)] === player) {
-                        return true;
+        function checkWinner(p) {
+            const b = gameState.board;
+            const dirs = [[0,1], [1,0], [1,1], [1,-1]];
+            for (let i = 0; i < BOARD_SQUARE; i++) {
+                if (b[i] !== p) continue;
+                const r = Math.floor(i / 15), c = i % 15;
+                for (const [dr, dc] of dirs) {
+                    let count = 1;
+                    for (let s = 1; s < 5; s++) {
+                        const nr = r + dr*s, nc = c + dc*s;
+                        if (nr >= 0 && nr < 15 && nc >= 0 && nc < 15 && b[nr*15+nc] === p) count++;
+                        else break;
                     }
-                    // 检查垂直方向
-                    if (row <= BOARD_SIZE - 5 &&
-                        gameState.board[getIndex(row + 1, col)] === player &&
-                        gameState.board[getIndex(row + 2, col)] === player &&
-                        gameState.board[getIndex(row + 3, col)] === player &&
-                        gameState.board[getIndex(row + 4, col)] === player) {
-                        return true;
-                    }
-                    // 检查右斜向下方向
-                    if (row <= BOARD_SIZE - 5 && col <= BOARD_SIZE - 5 &&
-                        gameState.board[getIndex(row + 1, col + 1)] === player &&
-                        gameState.board[getIndex(row + 2, col + 2)] === player &&
-                        gameState.board[getIndex(row + 3, col + 3)] === player &&
-                        gameState.board[getIndex(row + 4, col + 4)] === player) {
-                        return true;
-                    }
-                    // 检查左斜向下方向
-                    if (row <= BOARD_SIZE - 5 && col >= 4 &&
-                        gameState.board[getIndex(row + 1, col - 1)] === player &&
-                        gameState.board[getIndex(row + 2, col - 2)] === player &&
-                        gameState.board[getIndex(row + 3, col - 3)] === player &&
-                        gameState.board[getIndex(row + 4, col - 4)] === player) {
-                        return true;
-                    }
+                    if (count >= 5) return true;
                 }
             }
             return false;
         }
 
-        // 检查棋盘是否已满
-        function isBoardFull() {
-            return gameState.board.every(cell => cell !== 0);
+        // 浏览器环境诊断及教程提示功能
+        function showFixTutorial(error) {
+            const ua = navigator.userAgent;
+            const isMac = /Macintosh|Mac OS X/i.test(ua);
+            let browser = "Chrome";
+            if (ua.indexOf("Firefox") > -1) browser = "Firefox";
+            else if (ua.indexOf("Edg") > -1) browser = "Edge";
+            else if (ua.indexOf("OPR") > -1 || ua.indexOf("Opera") > -1) browser = "Opera";
+            else if (ua.indexOf("Safari") > -1 && ua.indexOf("Chrome") === -1) browser = "Safari";
+
+            const modal = document.getElementById('resultModal');
+            const title = document.getElementById('resultTitle');
+            const msg = document.getElementById('resultMsg');
+            const icon = document.getElementById('resultIcon');
+
+            icon.innerText = "🛠️";
+            title.innerText = "环境配置异常";
+            
+            let tutorial = `<div class="text-left text-xs space-y-2 mt-4 overflow-y-auto max-h-60">
+                <p class="font-bold text-red-500">检测到跨域错误 (CORS)：浏览器禁止直接从本地文件加载 AI 模型。</p>
+                <hr/>`;
+
+            if (browser === "Firefox") {
+                tutorial += `
+                    <p><b>Firefox 修复方案：</b></p>
+                    <ol class="list-decimal ml-4">
+                        <li>地址栏输入 <b>about:config</b> 并回车</li>
+                        <li>搜索 <b>privacy.file_unique_origin</b></li>
+                        <li>双击切换为 <b class="text-secondary">false</b></li>
+                        <li>重启浏览器并重新打开此 HTML</li>
+                    </ol>`;
+            } else if (browser === "Safari") {
+                tutorial += `
+                    <p><b>Safari 修复方案：</b></p>
+                    <ol class="list-decimal ml-4">
+                        <li>菜单栏选择“设置” -> “高级”</li>
+                        <li>勾选“在菜单栏中显示‘开发’菜单”</li>
+                        <li>点击上方菜单栏“开发” -> <b class="text-secondary">停用本地文件限制</b></li>
+                    </ol>`;
+            } else {
+                // Chrome, Edge, Opera 核心逻辑相似
+                const cmd = isMac 
+                    ? `open -a "Google Chrome" --args --allow-file-access-from-files` 
+                    : `chrome.exe --allow-file-access-from-files`;
+                tutorial += `
+                    <p><b>${browser} (Chromium) 修复方案：</b></p>
+                    <p>1. <b>推荐方案：</b> 使用 VS Code 的 <b>Live Server</b> 插件或执行 <code>python -m http.server</code> 启动本地服务器。</p>
+                    <p>2. <b>临时方案：</b> 完全退出浏览器，在终端/命令行运行：</p>
+                    <code class="block bg-gray-800 text-white p-2 rounded mt-1 break-all">${cmd}</code>`;
+            }
+
+            tutorial += `</div>`;
+            msg.innerHTML = tutorial;
+            
+            document.getElementById('btnPlayAgain').innerText = "查看在线文档";
+            document.getElementById('btnPlayAgain').onclick = () => window.open('https://github.com/whyb/Gomoku-AI/');
+            modal.classList.remove('hidden');
+            document.getElementById('loading').classList.add('hidden');
         }
-        
-        // 重置游戏
-        function resetGame() {
+
+        ort.env.wasm.numThreads = 1;
+        ort.env.wasm.simd = false;
+        async function init() {
+            drawGrid();
+            initInteractions();
+            try {
+                gameState.model = await ort.InferenceSession.create('model_bs15_win5.onnx');
+                document.getElementById('loading').classList.add('hidden');
+                reset();
+            } catch (e) {
+                console.error(e);
+                showFixTutorial(e);
+            }
+        }
+
+        function reset() {
             gameState.board = Array(BOARD_SQUARE).fill(0);
             gameState.gameOver = false;
-            gameState.isFirstMove = true;
-            updateBoardUI();
+            gameState.isAIMoving = false;
+            gameState.lastMove = -1;
+            document.getElementById('resultModal').classList.add('hidden');
+            document.getElementById('status').classList.add('animate-pulse');
+            initInteractions();
             
-            if (aiFirstCheckbox.checked) {
-                gameState.currentPlayer = 2;
+            if (document.getElementById('aiFirst').checked) {
                 gameState.isAIMoving = true;
-                statusElement.innerHTML = '<i class="fa fa-robot mr-2"></i>AI先行，准备落子...';
-                statusElement.className = 'game-message text-secondary';
-                if (gameState.model) {
-                    setTimeout(aiMove, 800);
-                }
+                document.getElementById('status').innerText = 'AI 思考开局...';
+                setTimeout(aiLogic, 1);
             } else {
-                gameState.currentPlayer = 1;
-                gameState.isAIMoving = false;
-                statusElement.innerHTML = '<i class="fa fa-user mr-2"></i>轮到你落子';
-                statusElement.className = 'game-message text-primary';
-            }
-            const cells = boardElement.querySelectorAll('.board-cell');
-            cells.forEach(cell => {
-                cell.style.backgroundColor = ''; // 恢复原始背景色
-            });
-        }
-        
-        // 加载ONNX模型 (已更新，适配8x8棋盘)
-        async function loadModel() {
-            try {
-                loadingElement.classList.remove('hidden');
-                console.log('开始加载模型...');
-                
-                // 确保你有一个针对8x8棋盘训练的onnx模型文件
-                gameState.model = await ort.InferenceSession.create('model_bs8_win5.onnx');
-                
-                console.log('模型加载成功！');
-                loadingElement.classList.add('hidden');
-                
-                resetGame();
-                
-            } catch (error) {
-                console.error('模型加载失败:', error);
-                loadingElement.classList.add('hidden');
-                statusElement.innerHTML = '<i class="fa fa-exclamation-triangle mr-2"></i>模型加载失败';
-                statusElement.className = 'game-message text-red-500';
-                alert('加载AI模型失败，请确保使用适配8x8的模型文件。');
+                document.getElementById('status').innerText = '执黑先行';
             }
         }
-        
-        // 事件监听
-        restartButton.addEventListener('click', resetGame);
-        infoButton.addEventListener('click', () => infoModal.classList.remove('hidden'));
-        closeInfoButton.addEventListener('click', () => infoModal.classList.add('hidden'));
-        
-        aiFirstCheckbox.addEventListener('change', resetGame);
-        
-        // 初始化
-        window.addEventListener('DOMContentLoaded', () => {
-            initializeBoard();
-            loadModel();
-        });
 
+        document.getElementById('restart').onclick = reset;
+        document.getElementById('btnPlayAgain').onclick = reset;
+        document.getElementById('btnCloseResult').onclick = () => document.getElementById('resultModal').classList.add('hidden');
+        
+        window.onload = init;
     </script>
 </body>
 </html>
