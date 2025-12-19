@@ -8,6 +8,8 @@
 
 [人机对战](https://whyb.github.io/Gomoku-AI/webdemo/)
 
+[![Demo](webdemo/demo.png)](https://whyb.github.io/Gomoku-AI/webdemo/)
+
 ## 特点
 
 - 使用 PyTorch 2.6.0+cu126 实现神经网络模型，支持 GPU 加速。
