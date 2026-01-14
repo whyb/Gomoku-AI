@@ -4,7 +4,7 @@ import random
 import time
 import argparse
 import math
-from collections import deque
+from collections import deque, defaultdict
 from copy import deepcopy
 
 import torch
@@ -22,10 +22,24 @@ if _ANOTHER_DIR not in sys.path:
 import Alpha_beta_optimize as ai_player
 import Global_variables as gv
 
-CPU_PARALLEL_ENVS = 16
-GPU_PARALLEL_ENVS = 4
+CPU_PARALLEL_ENVS = 0
+GPU_PARALLEL_ENVS = 14
 CPU_BATCH_SIZE = 128
-GPU_BATCH_SIZE = 512
+GPU_BATCH_SIZE = 4096
+
+# --- 性能统计辅助类 ---
+class PerformanceTracker:
+    def __init__(self):
+        self.stats = defaultdict(list)
+    
+    def add(self, name, duration):
+        self.stats[name].append(duration)
+        if len(self.stats[name]) > 100:  # 仅保留最近100次采样
+            self.stats[name].pop(0)
+
+    def get_avg(self, name):
+        if not self.stats[name]: return 0
+        return sum(self.stats[name]) / len(self.stats[name])
 
 def get_device_config():
     use_cuda = torch.cuda.is_available()
@@ -85,14 +99,22 @@ def env_worker(env_id, board_size, win_condition, model_queue, experience_queue,
             first_player = random.choice([1, 2])
             env.current_player = first_player
 
+            # 耗时统计记录
+            ts_thinking = 0
+            ts_inference = 0
+
             STEPS_PER_ENV = env.board_size * env.board_size
             while not done and total_steps < STEPS_PER_ENV:
                 state = env.get_state_representation()
                 state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
 
                 if env.current_player == 1:
+                    # 统计推理耗时
+                    t_start = time.time()
                     with torch.no_grad():
                         logits, _ = local_model(state_tensor)
+                    ts_inference += (time.time() - t_start)
+
                     board_flat = torch.tensor(env.board.flatten(), device=device)
                     eps = linear_schedule(Config.EPSILON1_START, Config.EPSILON1_END, latest_global_episodes, Config.EPSILON_DECAY)
                     action = get_valid_action(logits, board_flat, board_size, epsilon=eps)
@@ -106,7 +128,12 @@ def env_worker(env_id, board_size, win_condition, model_queue, experience_queue,
                         action = random.choice(valid_actions) if valid_actions else -1
                     else:
                         level = '比你6的Level' if r < (random_prob + strong_prob) else '和我一样6的Level'
+                        
+                        # 统计AI搜索耗时
+                        t_start = time.time()
                         pos = ai_player.machine_thinking(level)
+                        ts_thinking += (time.time() - t_start)
+
                         if not pos:
                             valid_actions = [i * board_size + j for i in range(board_size) for j in range(board_size) if env.board[i][j] == 0]
                             action = random.choice(valid_actions) if valid_actions else -1
@@ -150,7 +177,12 @@ def env_worker(env_id, board_size, win_condition, model_queue, experience_queue,
                         'device_type': device_type,
                         'experiences': episode_experience,
                         'first_player': first_player,
-                        'winner': env.current_player if done else 0
+                        'winner': env.current_player if done else 0,
+                        # 传回耗时数据
+                        'worker_stats': {
+                            'avg_thinking': ts_thinking / max(1, total_steps),
+                            'avg_inference': ts_inference / max(1, total_steps)
+                        }
                     })
                 except Exception as e:
                     # 若队列提交失败，把错误消息发回主进程
@@ -206,7 +238,10 @@ def train():
     main_device, use_cuda = get_device_config()
     batch_size = GPU_BATCH_SIZE if main_device.type == 'cuda' else CPU_BATCH_SIZE
 
-    REPLAY_BUFFER_SIZE = 30000
+    # 初始化性能跟踪
+    perf_tracker = PerformanceTracker()
+
+    REPLAY_BUFFER_SIZE = 60000
     PRINT_INTERVAL = 50
     total_cells = Config.BOARD_SIZE * Config.BOARD_SIZE
 
@@ -309,6 +344,14 @@ def train():
                 gpu_diff = gpu_episodes - last_gpu_episodes
                 speed = episodes_diff / time_diff if time_diff > 0 else 0
                 print(f"[速度统计] 过去 {time_diff:.1f} 秒完成 {episodes_diff} 局 | 平均速度: {speed:.2f} 局/秒")
+                
+                # 打印性能元凶分析
+                print(f"[性能耗时看板 - 最近100次采样平均]")
+                print(f"  1. 子进程-AI搜索 (Thinking): {perf_tracker.get_avg('child_thinking')*1000:.2f} ms/步")
+                print(f"  2. 子进程-模型推理 (Inference): {perf_tracker.get_avg('child_inference')*1000:.2f} ms/步")
+                print(f"  3. 主进程-Queue读取 (QueueGet): {perf_tracker.get_avg('main_queue_get')*1000:.2f} ms/循环")
+                print(f"  4. 主进程-GPU训练更新 (GPUTrain): {perf_tracker.get_avg('main_gpu_train')*1000:.2f} ms/批次")
+
                 # 打印子进程存活信息，帮助判断是否有子进程异常退出
                 alive_count = sum(1 for p in processes if p.is_alive())
                 if alive_count != total_envs:
@@ -333,6 +376,8 @@ def train():
                 last_gpu_episodes = gpu_episodes
 
             # 持续消费经验队列（每次循环尽可能多读入新经验）
+            # 统计队列读取耗时
+            t_q_start = time.time()
             while not experience_queue.empty():
                 try:
                     exp_data = experience_queue.get_nowait()
@@ -342,6 +387,11 @@ def train():
                 if isinstance(exp_data, dict) and 'error' in exp_data and 'experiences' not in exp_data:
                     print(f"[子进程消息] {exp_data.get('env_id')}: {exp_data.get('error')}")
                     continue
+
+                # 记录子进程传回的性能统计
+                if 'worker_stats' in exp_data:
+                    perf_tracker.add('child_thinking', exp_data['worker_stats']['avg_thinking'])
+                    perf_tracker.add('child_inference', exp_data['worker_stats']['avg_inference'])
 
                 episode_exps = exp_data.get('experiences', [])  # 单局按顺序经验列表
                 if not episode_exps:
@@ -395,6 +445,7 @@ def train():
                             replay_buffer1.append((s_swapped, a, G))
                         except Exception:
                             pass
+            perf_tracker.add('main_queue_get', time.time() - t_q_start)
 
             # 如果回放缓冲区不足以训练，则短暂等待并继续循环
             if len(replay_buffer1) < batch_size:
@@ -408,7 +459,12 @@ def train():
             batch1 = buf_list[:batch_size]
             remaining = buf_list[batch_size:]
             replay_buffer1 = deque(remaining, maxlen=REPLAY_BUFFER_SIZE)
+            
+            # 统计训练更新耗时
+            t_train_start = time.time()
             loss1, _ = update_model_batch(model, optimizer, policy_criterion, value_criterion, batch1, main_device)
+            perf_tracker.add('main_gpu_train', time.time() - t_train_start)
+
             scheduler.step()
             update_steps += 1
 
@@ -465,4 +521,3 @@ def train():
 
 if __name__ == "__main__":
     train()
-
