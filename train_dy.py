@@ -6,6 +6,7 @@ import argparse
 import math
 from collections import deque, defaultdict
 from copy import deepcopy
+import threading
 
 import torch
 import torch.nn as nn
@@ -23,9 +24,9 @@ import Alpha_beta_optimize as ai_player
 import Global_variables as gv
 
 CPU_PARALLEL_ENVS = 0
-GPU_PARALLEL_ENVS = 14
+GPU_PARALLEL_ENVS = 16
 CPU_BATCH_SIZE = 128
-GPU_BATCH_SIZE = 4096
+GPU_BATCH_SIZE = 2048
 
 # --- 性能统计辅助类 ---
 class PerformanceTracker:
@@ -309,6 +310,38 @@ def train():
 
     send_model_params(0)
 
+    # 共享变量用于打印日志
+    training_info = {"loss1": None, "update_steps": 0, "last_save_step": 0}
+    train_thread_running = True
+
+    # --- 异步训练线程函数 ---
+    def async_train_worker():
+        nonlocal replay_buffer1
+        while train_thread_running:
+            if len(replay_buffer1) >= batch_size:
+                # 采样并更新缓冲区
+                buf_list = list(replay_buffer1)
+                random.shuffle(buf_list)
+                batch1 = buf_list[:batch_size]
+                remaining = buf_list[batch_size:]
+                replay_buffer1 = deque(remaining, maxlen=REPLAY_BUFFER_SIZE)
+                
+                # 执行训练
+                t_train_start = time.time()
+                l1, _ = update_model_batch(model, optimizer, policy_criterion, value_criterion, batch1, main_device)
+                perf_tracker.add('main_gpu_train', time.time() - t_train_start)
+                
+                # 更新状态
+                training_info["loss1"] = l1
+                training_info["update_steps"] += 1
+                scheduler.step()
+            else:
+                time.sleep(0.01) # 缓冲区不足时稍作等待
+
+    # 启动异步训练线程
+    train_thread = threading.Thread(target=async_train_worker, daemon=True)
+    train_thread.start()
+
     total_win1 = 0
     total_win2 = 0
     total_draws = 0
@@ -319,8 +352,6 @@ def train():
     first_player2_draws = 0
     total_first1 = 0
     total_first2 = 0
-    update_steps = 0
-    last_save_step = 0
     cpu_episodes = 0
     gpu_episodes = 0
     start_time = time.time()
@@ -350,24 +381,13 @@ def train():
                 print(f"  1. 子进程-AI搜索 (Thinking): {perf_tracker.get_avg('child_thinking')*1000:.2f} ms/步")
                 print(f"  2. 子进程-模型推理 (Inference): {perf_tracker.get_avg('child_inference')*1000:.2f} ms/步")
                 print(f"  3. 主进程-Queue读取 (QueueGet): {perf_tracker.get_avg('main_queue_get')*1000:.2f} ms/循环")
-                print(f"  4. 主进程-GPU训练更新 (GPUTrain): {perf_tracker.get_avg('main_gpu_train')*1000:.2f} ms/批次")
+                print(f"  4. 主进程-GPU异步训练 (GPUTrain): {perf_tracker.get_avg('main_gpu_train')*1000:.2f} ms/批次")
 
                 # 打印子进程存活信息，帮助判断是否有子进程异常退出
                 alive_count = sum(1 for p in processes if p.is_alive())
                 if alive_count != total_envs:
                     print(f"[警告] 当前存活子进程: {alive_count}/{total_envs}")
-                # 检查队列中是否有错误信息
-                try:
-                    while not experience_queue.empty():
-                        msg = experience_queue.get_nowait()
-                        if isinstance(msg, dict) and 'error' in msg:
-                            print(f"[子进程错误] {msg.get('env_id')}: {msg.get('error')}")
-                        else:
-                            # 如果不是错误消息，把它放回队列以便后续处理
-                            experience_queue.put(msg)
-                            break
-                except Exception:
-                    pass
+                
                 if use_cuda:
                     print(f"[设备贡献] CPU: {cpu_diff} 局 | GPU: {gpu_diff} 局")
                 last_print_time = current_time
@@ -375,25 +395,23 @@ def train():
                 last_cpu_episodes = cpu_episodes
                 last_gpu_episodes = gpu_episodes
 
-            # 持续消费经验队列（每次循环尽可能多读入新经验）
-            # 统计队列读取耗时
+            # 主循环主要负责极其高效地“收割”经验
             t_q_start = time.time()
             while not experience_queue.empty():
                 try:
                     exp_data = experience_queue.get_nowait()
                 except Exception:
                     break
-                # 如果子进程回传错误消息，打印并跳过
+                
                 if isinstance(exp_data, dict) and 'error' in exp_data and 'experiences' not in exp_data:
                     print(f"[子进程消息] {exp_data.get('env_id')}: {exp_data.get('error')}")
                     continue
 
-                # 记录子进程传回的性能统计
                 if 'worker_stats' in exp_data:
                     perf_tracker.add('child_thinking', exp_data['worker_stats']['avg_thinking'])
                     perf_tracker.add('child_inference', exp_data['worker_stats']['avg_inference'])
 
-                episode_exps = exp_data.get('experiences', [])  # 单局按顺序经验列表
+                episode_exps = exp_data.get('experiences', [])
                 if not episode_exps:
                     continue
                 winner = exp_data.get('winner', 0)
@@ -426,7 +444,6 @@ def train():
                 else:
                     gpu_episodes += 1
 
-                # 计算蒙特卡洛回报（从后向前累积）并加入长期回放缓冲区
                 returns = []
                 G = 0.0
                 for s, a, r, p in reversed(episode_exps):
@@ -447,35 +464,15 @@ def train():
                             pass
             perf_tracker.add('main_queue_get', time.time() - t_q_start)
 
-            # 如果回放缓冲区不足以训练，则短暂等待并继续循环
-            if len(replay_buffer1) < batch_size:
-                time.sleep(0.01)
-                continue
-
-            loss1 = None
-            # 从回放缓冲区采样一批用于训练，并从缓冲区中移除被采样的数据，保证新经验被持续消费
-            buf_list = list(replay_buffer1)
-            random.shuffle(buf_list)
-            batch1 = buf_list[:batch_size]
-            remaining = buf_list[batch_size:]
-            replay_buffer1 = deque(remaining, maxlen=REPLAY_BUFFER_SIZE)
-            
-            # 统计训练更新耗时
-            t_train_start = time.time()
-            loss1, _ = update_model_batch(model, optimizer, policy_criterion, value_criterion, batch1, main_device)
-            perf_tracker.add('main_gpu_train', time.time() - t_train_start)
-
-            scheduler.step()
-            update_steps += 1
-
+            # 打印与保存逻辑（在主循环中按局数触发）
             if (total_episodes % PRINT_INTERVAL) == 0 and total_episodes > 0:
                 # 计算各种率
                 win_rate1 = (total_win1 / total_episodes * 100)
-                
+
                 # AI先手情况下的统计
                 f1_win_rate = (first_player1_wins / total_first1 * 100 if total_first1 else 0)
                 f1_draw_rate = (first_player1_draws / total_first1 * 100 if total_first1 else 0)
-                
+
                 # 陪练先手情况下的统计 (陪练的胜率)
                 f2_win_rate = (first_player2_wins / total_first2 * 100 if total_first2 else 0)
                 f2_draw_rate = (first_player2_draws / total_first2 * 100 if total_first2 else 0)
@@ -485,39 +482,37 @@ def train():
                 print(f"  AI先手的胜率: AI先手: {f1_win_rate:.1f}% |  平局率: {f1_draw_rate:.1f}%")
                 print(f"  陪练先手的胜率: {f2_win_rate:.1f}% | 平局率: {f2_draw_rate:.1f}%")
                 
-                if loss1 is not None:
+                if training_info["loss1"] is not None:
                     current_lr = optimizer.param_groups[0]['lr']
-                    print(f"  损失值: P1: {loss1:.4f} | 学习率: {current_lr:.6f}")
+                    print(f"  损失值: P1: {training_info['loss1']:.4f} | 学习率: {current_lr:.6f} | 更新步数: {training_info['update_steps']}")
                 print("  ------------------------")
 
-            if (update_steps - last_save_step) >= Config.SAVE_INTERVAL and update_steps > 0:
-                filename = f'gobang_model_player1_dy_step_{update_steps}.pth'
+            # 保存模型
+            u_steps = training_info["update_steps"]
+            if (u_steps - training_info["last_save_step"]) >= Config.SAVE_INTERVAL and u_steps > 0:
+                filename = f'gobang_model_player1_dy_step_{u_steps}.pth'
                 torch.save(model.state_dict(), filename)
                 history_pool.append(deepcopy(model))
                 best_model.load_state_dict(model.state_dict())
                 send_model_params(total_episodes)
-                print(f"[模型保存] 第 {total_episodes} 局模型已保存")
-                last_save_step = update_steps
+                print(f"[模型保存] 第 {total_episodes} 局模型已保存 (更新步数: {u_steps})")
+                training_info["last_save_step"] = u_steps
+            
+            # 主循环不再等待训练，但为了避免 CPU 占用过高，增加极小延迟
+            time.sleep(0.001)
+
     except KeyboardInterrupt:
         print("\n[中断] 收到 Ctrl+C，正在安全退出...")
     finally:
+        train_thread_running = False
+        train_thread.join(timeout=1)
         for p in processes:
             p.terminate()
         torch.save(model.state_dict(), 'gobang_best_model_dy.pth')
         print("\n[训练结束] 最终模型已保存")
-        total = total_win1 + total_win2
-        if total > 0:
-            print(f"总胜率: P1: {total_win1/total*100:.1f}% ({total_win1}/{total_win2})")
-            if total_first1 > 0:
-                print(f"AI先手的胜率: {first_player1_wins/total_first1*100:.1f}%")
-            if total_first2 > 0:
-                print(f"陪练先手的胜率: {first_player2_wins/total_first2*100:.1f}%")
         total_time = time.time() - start_time
         if total_time > 0:
-            total_speed = total_episodes / total_time
-            print(f"总训练速度: {total_speed:.2f} 局/秒 (共 {total_episodes} 局，耗时 {total_time:.1f} 秒)")
-            if use_cuda:
-                print(f"设备贡献: CPU: {cpu_episodes} 局 ({(cpu_episodes/total_episodes*100) if total_episodes else 0:.1f}%) | GPU: {gpu_episodes} 局 ({(gpu_episodes/total_episodes*100) if total_episodes else 0:.1f}%)")
+            print(f"总训练速度: {total_episodes / total_time:.2f} 局/秒")
 
 if __name__ == "__main__":
     train()

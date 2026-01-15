@@ -28,7 +28,8 @@ def export(model_path, board_size, onnx_path, torchscript_path):
                 "input": {2: "height", 3: "width"},
                 "policy_logits": {1: "cells"}
             },
-            opset_version=13
+            opset_version=18,
+            external_data=False,
         )
         print(f"ONNX saved: {onnx_path}")
     if torchscript_path:
