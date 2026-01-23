@@ -33,14 +33,15 @@ def play_round(board_size, win_condition, model_state_dict):
 
 def validator():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--board_size", type=int, help="Size of the game board")
-    parser.add_argument("--win_condition", type=int, help="Number of consecutive stones to win")
-    parser.add_argument("--total_rounds", type=int, default=1000)
+    parser.add_argument("--board_size", type=int, default=15, help="Size of the game board")
+    parser.add_argument("--win_condition", type=int, default=5, help="Number of consecutive stones to win")
+    parser.add_argument("--total_rounds", type=int, default=200, help="Number of rounds")
+    parser.add_argument("--model_path", type=str, default='gobang_best_model_dy.pth', help="Path to the weight file")
     args = parser.parse_args()
     update_config_from_cli(args)
 
     model = GomokuNetDyn()
-    load_model_if_exists(model, 'gobang_best_model_dy.pth')
+    load_model_if_exists(model, args.model_path)
     state = {k: v.cpu() for k, v in model.state_dict().items()}
 
     p1_first = 0
