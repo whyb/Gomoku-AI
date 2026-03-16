@@ -232,6 +232,8 @@ python export_onnx_dy.py gobang_best_model_dy.pth \
 ```
 导出onnx执行成功后，会在目录中产生 `./model_*x*.pt`、`./webdemo/model_*x*.onnx` 命名的文件，后续就可以使用webdemo/下面的人机对战程序进行测试。
 
+## Projects using Gomoku-AI
+* [基于alphazero的TW对弈插件](https://www.bilibili.com/video/BV1V5cozPELG/)
 
 ## 欢迎贡献
 
