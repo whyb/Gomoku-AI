@@ -226,7 +226,7 @@ python export_onnx_dy.py gobang_best_model_dy.pth --board_size 15 --win_conditio
 
 # 自定义输出路径
 python export_onnx_dy.py gobang_best_model_dy.pth \
-  --board_size 15 --win_condition 5 \
+  --board_size 15 \
   --onnx_path ./webdemo/model_bs15_win5.onnx
 
 ```
