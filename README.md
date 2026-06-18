@@ -21,6 +21,7 @@
 - 支持自定义棋盘尺寸和胜利条件，轻松地将模型应用于不同规则的五子棋变体。
 - 动态shape版本支持训练期间的棋盘与推理期间的棋盘尺寸不一致，模型具有泛化性。
 - Player1 与 Kali-Hac Gomoku-AI 交替先手对战，Player1 作为训练目标。（新版本，动态模型版本）
+- AlphaZero 风格训练：MCTS 自博弈 + 对手池 + D4 对称增强 + SE-ResNet 架构，模型持续进化
 
 
 ## 依赖
@@ -58,6 +59,57 @@ python train_dy.py --board_size 8 --win_condition 5
 训练过程中，每 `config.SAVE_INTERVAL` 回合会保存一次 Player1 的模型权重，生成 `gobang_model_player1_*.pth`（静态shape模型） 或 `gobang_model_player1_dy_step_*.pth`（动态shape模型） 文件
 
 训练结束后会生成 `gobang_best_model.pth`（静态shape模型）、`gobang_best_model_dy.pth`（动态shape模型） 作为最终权重文件，支持从该文件继续开始训练
+
+#### AlphaZero 风格训练（推荐）
+
+基于 AlphaZero 的训练流水线，通过 **MCTS 自博弈** 替代固定对手训练，能够持续进化：
+
+```shell
+# 使用小型 SE-ResNet 模型（64通道，6层，~460K 参数）— 适合快速实验
+python train_alphazero.py --board_size 10 --model small --num_simulations 200
+
+# 使用标准 SE-ResNet 模型（128通道，10层，~3M 参数）— 推荐正式训练
+python train_alphazero.py --board_size 15 --num_simulations 400
+
+# 异步并行训练（利用多核 CPU 加速 MCTS）
+python train_async.py --board_size 15 --num_simulations 400 --num_workers 20
+```
+
+与传统训练方式相比，AlphaZero 流水线具备以下特性：
+
+- **MCTS（蒙特卡洛树搜索）**：使用 PUCT 选择策略，每步模拟 200~800 次，生成高质量的落子策略 π
+- **自博弈训练**：模型与自身对弈生成训练数据，不再依赖固定对手
+- **对手池（Opponent Pool）**：自动保存历史模型快照，训练时 50% 概率与历史版本对弈，避免灾难性遗忘
+- **D4 对称增强**：每次经验自动应用 8 种旋转/翻转变换，数据量放大 8 倍
+- **Elo 评分系统**：追踪模型实力变化，自动评估新旧版本
+- **温度退火**：前期高温度鼓励探索，后期低温度选择最优落子
+- **完整断点续训**：自动保存模型、优化器、调度器、训练步数、总对局数等全部状态
+
+AlphaZero 版本使用 **SE-ResNet（Squeeze-Excitation Residual Network）**，在标准残差块中加入通道注意力机制：
+
+| 模型 | 通道数 | 层数 | 参数量 | 适用场景 |
+|------|--------|------|--------|----------|
+| GomokuNetAlphaZeroSmall | 64 | 6 | ~460K | 快速实验、小棋盘 |
+| GomokuNetAlphaZero | 128 | 10 | ~3M | 正式训练、大棋盘 |
+
+损失函数与传统 `CE × reward` 不同，使用三个损失的加权和：
+
+```
+L = (z - v)² - π^T · log(p) + c · ||θ||²
+    ─────   ─────────────   ───────
+    价值MSE   策略交叉熵     L2正则
+```
+
+- `z`：游戏最终结果（+1赢 / -1输 / 0平），`v`：模型预测的价值
+- `π`：MCTS 搜索得到的策略分布，`p`：模型预测的策略概率
+
+训练日志示例：
+```
+Game  42 | 127 moves | winner=Black | opponent=history | 896 samples | 4.2s
+  MCTS: 2.1s | NN: 1.5s | symm: 0.4s | avg: 30 sims/s
+```
+- `opponent=history`：对手来自历史模型池；`opponent=self`：对手是当前最新模型
+- `samples`：本局生成的训练样本数（已含对称增强）
 
 ### AI 奖励机制详解
 
@@ -230,7 +282,19 @@ python export_onnx_dy.py gobang_best_model_dy.pth \
   --onnx_path ./webdemo/model_bs15_win5.onnx
 
 ```
-导出onnx执行成功后，会在目录中产生 `./model_*x*.pt`、`./webdemo/model_*x*.onnx` 命名的文件，后续就可以使用webdemo/下面的人机对战程序进行测试。
+#### AlphaZero 模型导出
+```shell
+# 导出 Small 模型
+python export_onnx_az.py alpaz_small_15x15_model.pth --board_size 15 --model small
+
+# 导出 Standard 模型
+python export_onnx_az.py alpaz_standard_15x15_model.pth --board_size 15 --model standard
+
+# 自定义输出路径
+python export_onnx_az.py alpaz_small_15x15_model.pth --board_size 15 --model small --onnx_path ./webdemo/az_model.onnx
+```
+
+导出onnx执行成功后，会在目录中产生 `gobang_az_*_*x*.onnx` 和 `gobang_az_*_*x*.pt` 文件，后续就可以使用webdemo/下面的人机对战程序进行测试。
 
 ## Projects using Gomoku-AI
 * [基于alphazero的TW对弈插件](https://www.bilibili.com/video/BV1V5cozPELG/)

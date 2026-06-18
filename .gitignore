@@ -2,3 +2,4 @@
 *.pt
 /__pycache__/*
 /another/__pycache__/
+.claude/

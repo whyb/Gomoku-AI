@@ -3,13 +3,26 @@ class Config:
     # 棋盘配置
     BOARD_SIZE = 10  # 默认10x10，可通过命令行参数修改
     WIN_CONDITION = 5  # 胜利条件（连珠数）
-    
+
     # 训练参数
-    LEARNING_RATE = 9e-2 # 0.001
+    # 注意: 原始 LR=0.09 过高，标准范围 1e-3 ~ 3e-3
+    LEARNING_RATE = 2e-3
     # 动态学习率调度参数
-    LR_MIN = 3e-5
+    LR_MIN = 1e-5
     LR_WARMUP_STEPS = 10000
     LR_DECAY_STEPS = 300000
+
+    # AlphaZero 相关配置
+    MCTS_SIMULATIONS = 400       # MCTS 模拟次数 (AlphaZero 用 800)
+    MCTS_C_PUCT = 1.5            # PUCT 探索常数
+    DIRICHLET_ALPHA = 0.3        # Dirichlet 噪声 alpha
+    DIRICHLET_EPSILON = 0.25     # 噪声混合比例
+    TEMP_THRESHOLD = 30          # 温度退火阈值 (前 N 步 τ=1.0)
+    SELF_PLAY_GAMES = 16         # 每次迭代自博弈局数
+    OPPONENT_POOL_SIZE = 20      # 对手池大小
+    OPPONENT_POOL_INTERVAL = 500 # 对手池更新间隔
+    SYMMETRY_AUGMENT = True      # 是否进行对称增强 (8×)
+    AMP_ENABLED = True           # 是否使用混合精度训练
     # 探索率配置
     EPSILON1_START = 0.9   # Player1初始探索率
     EPSILON1_END = 0.05    # Player1最终探索率
