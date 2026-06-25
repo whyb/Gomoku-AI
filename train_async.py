@@ -28,7 +28,7 @@ import signal
 import argparse
 import numpy as np
 from collections import deque
-from multiprocessing import Process, Queue, Value, Manager
+from multiprocessing import Process, Queue, Value
 from concurrent.futures import ProcessPoolExecutor
 
 import torch
@@ -53,7 +53,8 @@ def gpu_inference_service(
     model_state_dict: dict,
     device: str,
     request_queue: Queue,
-    result_dict: dict,
+    result_queues: dict,
+    weight_update_queue: Queue,
     board_size: int,
     batch_size: int,
     shutdown_flag,
@@ -62,7 +63,8 @@ def gpu_inference_service(
     """
     GPU 推理服务进程
 
-    从 request_queue 批量取出推理请求, 一次性送入 GPU, 结果写入 result_dict
+    从 request_queue 批量取出推理请求, 一次性送入 GPU, 结果通过 per-worker Queue 分发.
+    支持通过 weight_update_queue 热更新模型权重 (无需重启进程).
     """
     # 创建模型
     if model_class_name == 'GomokuNetAlphaZeroSmall':
@@ -74,6 +76,17 @@ def gpu_inference_service(
     model.eval()
 
     while not shutdown_flag.value:
+        # 检查权重更新 (非阻塞, 每次推理批次后检查一次)
+        try:
+            new_state = weight_update_queue.get_nowait()
+            if new_state is None:
+                break  # 哨兵值, 退出
+            model.load_state_dict(new_state)
+            model.eval()
+            del new_state
+        except Exception:
+            pass  # 队列为空, 继续推理
+
         # 批量收集请求 (最多等 5ms 或收集到 batch_size 个)
         batch_requests = []
         deadline = time.perf_counter() + 0.005  # 5ms 超时
@@ -105,28 +118,40 @@ def gpu_inference_service(
         policies = logits.cpu().numpy()
         values_np = values.cpu().numpy()
 
-        # 分发结果
+        # 通过 per-worker 队列分发结果 (无 Manager IPC 开销)
         for i, req in enumerate(batch_requests):
-            result_dict[req['request_id']] = {
-                'policy': policies[i],
-                'value': values_np[i],
-            }
+            worker_id = req['worker_id']
+            rq = result_queues.get(worker_id)
+            if rq is not None:
+                rq.put((req['request_id'], policies[i], values_np[i]))
 
 
 # ============================================================
 # 自博弈 Worker (CPU 进程, 通过队列请求 GPU 推理)
 # ============================================================
 
-def _wait_for_result(result_dict, req_id, shutdown_flag, timeout=10.0):
-    """安全地等待并获取结果, 支持超时和中断"""
+def _wait_for_result(result_queue, req_id, shutdown_flag, timeout=10.0):
+    """从 per-worker 队列中等待指定 request_id 的结果, 支持超时和中断"""
     deadline = time.perf_counter() + timeout
+    # 缓存不属于当前请求的结果
+    stash = {}
     while time.perf_counter() < deadline:
         if shutdown_flag.value:
             return None
         try:
-            return result_dict.pop(req_id)
-        except KeyError:
-            time.sleep(0.002)
+            rid, policy, value = result_queue.get(timeout=0.005)
+            if rid == req_id:
+                # 把暂存的其他结果放回队列
+                for k, v in stash.items():
+                    result_queue.put(v)
+                return {'policy': policy, 'value': value}
+            else:
+                stash[rid] = (rid, policy, value)
+        except Exception:
+            pass
+    # 超时, 把暂存的结果放回队列
+    for v in stash.values():
+        result_queue.put(v)
     return None
 
 
@@ -136,7 +161,7 @@ def selfplay_worker(
     win_condition: int,
     num_simulations: int,
     request_queue: Queue,
-    result_dict: dict,
+    result_queue: Queue,
     experience_queue: Queue,
     num_games: int,
     shutdown_flag,
@@ -168,11 +193,15 @@ def selfplay_worker(
             req_id = req_id_base + req_counter
             req_counter += 1
 
-            # 发送推理请求
-            request_queue.put({'request_id': req_id, 'state': state})
+            # 发送推理请求 (附带 worker_id 用于结果路由)
+            request_queue.put({
+                'request_id': req_id,
+                'worker_id': worker_id,
+                'state': state,
+            })
 
             # 等待结果
-            result = _wait_for_result(result_dict, req_id, shutdown_flag)
+            result = _wait_for_result(result_queue, req_id, shutdown_flag)
             if result is None:
                 # 超时或中断, 用均匀分布 fallback
                 valid = np.where(board.reshape(-1) == 0)[0]
@@ -355,17 +384,19 @@ def train(args):
         print(f">>> LR={optimizer.param_groups[0]['lr']:.6f}")
     print("=" * 60)
 
-    # 共享状态
-    manager = Manager()
+    # 共享状态 (无 Manager, 全部用 Queue — 避免 socket IPC 开销)
     request_queue = Queue(maxsize=10000)
-    result_dict = manager.dict()
     experience_queue = Queue(maxsize=1000)
+    weight_update_queue = Queue(maxsize=2)
     shutdown_flag = Value('i', 0)
+
+    # per-worker 结果队列 (替代 Manager().dict, 消除轮询开销)
+    result_queues = {wid: Queue(maxsize=5000) for wid in range(num_workers)}
 
     # 保存初始模型供 GPU 服务加载
     init_state = {k: v.cpu() for k, v in model.state_dict().items()}
 
-    # 启动 GPU 推理服务
+    # 启动 GPU 推理服务 (长驻进程, 后续通过 weight_update_queue 热更新权重)
     gpu_process = Process(
         target=gpu_inference_service,
         kwargs={
@@ -373,7 +404,8 @@ def train(args):
             'model_state_dict': init_state,
             'device': device,
             'request_queue': request_queue,
-            'result_dict': result_dict,
+            'result_queues': result_queues,
+            'weight_update_queue': weight_update_queue,
             'board_size': board_size,
             'batch_size': batch_size,
             'shutdown_flag': shutdown_flag,
@@ -411,6 +443,10 @@ def train(args):
         nonlocal running
         print("\n收到中断信号...")
         shutdown_flag.value = 1
+        try:
+            weight_update_queue.put(None)  # 哨兵值, 解除 GPU 服务阻塞
+        except Exception:
+            pass
         running = False
     signal.signal(signal.SIGINT, signal_handler)
 
@@ -436,7 +472,7 @@ def train(args):
                     'win_condition': win_condition,
                     'num_simulations': num_simulations,
                     'request_queue': request_queue,
-                    'result_dict': result_dict,
+                    'result_queue': result_queues[wid],
                     'experience_queue': experience_queue,
                     'num_games': games_this_worker,
                     'shutdown_flag': shutdown_flag,
@@ -509,32 +545,18 @@ def train(args):
             total_p_loss += policy_loss.item()
             total_v_loss += value_loss.item()
 
-        # 更新 GPU 服务的模型权重
+        # 热更新 GPU 服务的模型权重 (无需重启进程)
         new_state = {k: v.cpu() for k, v in model.state_dict().items()}
-        # 重启 GPU 服务以加载新权重 (简化实现)
-        shutdown_flag.value = 1
-        gpu_process.join(timeout=3)
-        if gpu_process.is_alive():
-            gpu_process.terminate()
-
-        shutdown_flag.value = 0
-        result_dict.clear()
-
-        gpu_process = Process(
-            target=gpu_inference_service,
-            kwargs={
-                'model_class_name': model_class_name,
-                'model_state_dict': new_state,
-                'device': device,
-                'request_queue': request_queue,
-                'result_dict': result_dict,
-                'board_size': board_size,
-                'batch_size': batch_size,
-                'shutdown_flag': shutdown_flag,
-            },
-            daemon=True
-        )
-        gpu_process.start()
+        try:
+            # 清空队列中旧的权重更新 (只保留最新的)
+            while not weight_update_queue.empty():
+                try:
+                    weight_update_queue.get_nowait()
+                except Exception:
+                    break
+            weight_update_queue.put(new_state)
+        except Exception:
+            pass  # 队列满, 跳过本次更新
 
         # 统计
         avg_loss = total_loss / num_train_steps
@@ -561,6 +583,10 @@ def train(args):
 
     # 清理
     shutdown_flag.value = 1
+    try:
+        weight_update_queue.put(None)  # 哨兵值, 通知 GPU 服务退出
+    except Exception:
+        pass
     if gpu_process.is_alive():
         gpu_process.join(timeout=3)
 
