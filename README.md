@@ -71,8 +71,6 @@ python train_alphazero.py --board_size 10 --model small --num_simulations 200
 # 使用标准 SE-ResNet 模型（128通道，10层，~3M 参数）— 推荐正式训练
 python train_alphazero.py --board_size 15 --num_simulations 400
 
-# 异步并行训练（利用多核 CPU 加速 MCTS）
-python train_async.py --board_size 15 --num_simulations 400 --num_workers 20
 ```
 
 与传统训练方式相比，AlphaZero 流水线具备以下特性：
