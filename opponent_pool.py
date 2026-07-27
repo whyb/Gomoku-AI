@@ -62,6 +62,9 @@ class OpponentPool:
         self.update_interval = update_interval
         self.selection_strategy = selection_strategy
         self.games_since_update = 0
+        # GPU 模型缓存: model_id → nn.Module (避免每次 sample_opponent 创建新模型)
+        self._gpu_model_cache: Dict[str, nn.Module] = {}
+        self._last_selected_id: str = ''
 
     def add_model(self, model: nn.Module, model_id: str,
                   elo: float = 1500.0, step: int = 0):
@@ -88,7 +91,10 @@ class OpponentPool:
                         *model_args, **model_kwargs
                         ) -> Optional[nn.Module]:
         """
-        随机采样一个对手模型
+        随机采样一个对手模型 (带 GPU 缓存, 避免显存泄露)
+
+        关键修复: 同一 model_id 的对手模型在 GPU 上只创建一次,
+        后续请求直接返回缓存的模型引用, 避免每次创建新模型导致显存无限增长。
 
         Args:
             model_class: 模型类 (如 GomokuNetAlphaZero), None 则用存储时的类
@@ -101,8 +107,28 @@ class OpponentPool:
             return None
 
         entry = self._select_entry()
+        self._last_selected_id = entry.model_id
 
-        # 根据存储时的模型类名创建正确的模型
+        # GPU 缓存 key: device + model_id (不同 device 不能共享)
+        cache_key = f'{device}:{entry.model_id}'
+
+        if cache_key in self._gpu_model_cache:
+            # 复用已缓存的 GPU 模型 (避免显存泄露)
+            entry.games_as_opponent += 1
+            return self._gpu_model_cache[cache_key]
+
+        # 清理过期缓存: 当池中不再包含某个 model_id 时释放其 GPU 内存
+        active_ids = {f'{device}:{e.model_id}' for e in self.pool}
+        stale_keys = [k for k in self._gpu_model_cache if k not in active_ids]
+        for k in stale_keys:
+            del self._gpu_model_cache[k]
+
+        # 限制缓存大小 (防御性编程, 最多保留 max_size + 5 个)
+        while len(self._gpu_model_cache) > self.max_size + 5:
+            oldest_key = next(iter(self._gpu_model_cache))
+            del self._gpu_model_cache[oldest_key]
+
+        # 创建新模型并缓存
         if model_class is not None:
             model = model_class(*model_args, **model_kwargs)
         else:
@@ -112,6 +138,7 @@ class OpponentPool:
         model = model.to(device)
         model.eval()
 
+        self._gpu_model_cache[cache_key] = model
         entry.games_as_opponent += 1
         return model
 

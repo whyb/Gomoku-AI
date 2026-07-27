@@ -310,10 +310,10 @@ class SelfPlayManager:
         for game_idx in range(num_games):
             game_start = time.time()
 
-            opponent_model = self._select_opponent()
+            opponent_model, opponent_id = self._select_opponent()
 
             if opponent_model is not None:
-                game_result = self._play_against_opponent(opponent_model)
+                game_result = self._play_against_opponent(opponent_model, opponent_id)
                 opponent_type = 'history'
             else:
                 game_result = self.worker.play_one_game(game_id=self.game_count)
@@ -361,7 +361,7 @@ class SelfPlayManager:
             game_id = self.game_count + i
             opp_dict = None
 
-            opponent_model = self._select_opponent()
+            opponent_model, opponent_id = self._select_opponent()
             if opponent_model is not None:
                 opp_dict = {k: v.cpu().clone()
                             for k, v in opponent_model.state_dict().items()}
@@ -417,29 +417,48 @@ class SelfPlayManager:
 
         return all_data
 
-    def _select_opponent(self) -> Optional[nn.Module]:
-        """选择对手 (自博弈 vs 历史模型)"""
+    def _select_opponent(self) -> Tuple[Optional[nn.Module], str]:
+        """选择对手 (自博弈 vs 历史模型)
+
+        Returns:
+            (opponent_model, opponent_id): opponent_model 为 None 表示自博弈,
+            opponent_id 用于缓存 key (稳定标识, 非 Python id())
+        """
         if self.opponent_pool is None:
-            return None
+            return None, ''
 
         # 50% 概率与历史模型对弈
         if np.random.random() < 0.5 and len(self.opponent_pool.pool) > 0:
-            return self.opponent_pool.sample_opponent(device=self.device)
-        return None
+            model = self.opponent_pool.sample_opponent(device=self.device)
+            opponent_id = self.opponent_pool._last_selected_id
+            return model, opponent_id
+        return None, ''
 
-    def _play_against_opponent(self, opponent_model: nn.Module) -> GameResult:
-        """与历史模型对弈一局 (复用缓存的 opponent worker)"""
-        # 缓存复用: 避免每局游戏都创建新的 SelfPlayWorker + BatchMCTS
-        model_id = id(opponent_model)
-        if model_id not in self._opponent_worker_cache:
-            self._opponent_worker_cache[model_id] = SelfPlayWorker(
+    def _play_against_opponent(self, opponent_model: nn.Module,
+                               opponent_id: str = '') -> GameResult:
+        """与历史模型对弈一局 (复用缓存的 opponent worker)
+
+        使用 opponent_id (稳定标识) 而非 id(opponent_model) 作为缓存 key,
+        避免因 sample_opponent 返回新对象导致缓存永远 miss 的显存泄露。
+        """
+        cache_key = opponent_id or str(id(opponent_model))
+
+        # 限制缓存大小, 清理不活跃的旧条目 (防御性编程)
+        if cache_key not in self._opponent_worker_cache:
+            if len(self._opponent_worker_cache) > 20:
+                # 删除最旧的条目
+                oldest_key = next(iter(self._opponent_worker_cache))
+                del self._opponent_worker_cache[oldest_key]
+
+        if cache_key not in self._opponent_worker_cache:
+            self._opponent_worker_cache[cache_key] = SelfPlayWorker(
                 opponent_model, self.device,
                 self.board_size, self.win_condition,
                 num_simulations=self.worker.mcts.num_simulations,
                 mcts_batch_size=self.worker.mcts.batch_size,
                 fp16=self.fp16
             )
-        opponent_worker = self._opponent_worker_cache[model_id]
+        opponent_worker = self._opponent_worker_cache[cache_key]
 
         board = np.zeros((self.board_size, self.board_size), dtype=np.int32)
         steps = []
