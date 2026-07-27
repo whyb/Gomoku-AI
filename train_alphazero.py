@@ -21,10 +21,16 @@ import time
 import signal
 import argparse
 import random
+import warnings
 import numpy as np
 from collections import deque
 from typing import List, Tuple
 from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# 解决 Windows ROCm MIOpen bug: "Invalid elapsed time detected in EvaluateInvokers"
+# 必须在 import torch 之前设置，使用宽松的搜索模式避免 GPU 计时异常
+os.environ.setdefault('MIOPEN_FIND_ENFORCE', '3')       # SEARCH_DB_UPDATE，不完全搜索
+os.environ.setdefault('MIOPEN_FIND_MODE', '1')           # 快速模式
 
 import torch
 import torch.nn as nn
@@ -34,6 +40,13 @@ from torch.amp import autocast, GradScaler
 
 # 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# GradScaler.step(optimizer) 调用 optimizer.step() 在先，scheduler.step() 在后，
+# 但 PyTorch 的 _step_count 检测无法穿透 GradScaler，产生误报警告。此处禁用它。
+warnings.filterwarnings(
+    'ignore',
+    message='Detected call of `lr_scheduler.step()` before `optimizer.step()`'
+)
 
 from config import Config, update_config_from_cli
 from model_alphazero import GomokuNetAlphaZero, GomokuNetAlphaZeroSmall
