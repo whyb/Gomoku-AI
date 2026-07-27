@@ -115,7 +115,7 @@ class MCTS:
 
     def __init__(self, model, device, num_simulations: int = 800,
                  c_puct: float = 1.5, dirichlet_alpha: float = 0.3,
-                 dirichlet_epsilon: float = 0.25):
+                 dirichlet_epsilon: float = 0.25, fp16: bool = False):
         """
         Args:
             model: 神经网络模型 (输出 policy logits, value)
@@ -124,6 +124,7 @@ class MCTS:
             c_puct: PUCT 探索常数 (越大越偏探索)
             dirichlet_alpha: Dirichlet 噪声 alpha 参数
             dirichlet_epsilon: 噪声混合比例
+            fp16: 是否用 FP16 混合精度推理 (仅前向, 无梯度)
         """
         self.model = model
         self.device = device
@@ -131,6 +132,9 @@ class MCTS:
         self.c_puct = c_puct
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
+        self.fp16 = fp16
+        # autocast device_type: 兼容 'cuda' 和 ROCm 的 'cuda' 设备标识
+        self._amp_device = 'cuda' if ('cuda' in device or device != 'cpu') else 'cpu'
 
     @torch.no_grad()
     def _evaluate(self, state: np.ndarray) -> Tuple[np.ndarray, float]:
@@ -148,8 +152,9 @@ class MCTS:
         ).unsqueeze(0).to(self.device)
 
         self.model.eval()
-        logits, value = self.model(state_tensor)
-        policy = logits.squeeze(0).cpu().numpy()
+        with torch.amp.autocast(self._amp_device, enabled=self.fp16):
+            logits, value = self.model(state_tensor)
+        policy = logits.squeeze(0).float().cpu().numpy()
         value = value.item()
         return policy, value
 
@@ -341,7 +346,7 @@ class BatchMCTS:
     def __init__(self, model, device, num_simulations: int = 800,
                  c_puct: float = 1.5, dirichlet_alpha: float = 0.3,
                  dirichlet_epsilon: float = 0.25,
-                 batch_size: int = 16):
+                 batch_size: int = 16, fp16: bool = False):
         self.model = model
         self.device = device
         self.num_simulations = num_simulations
@@ -349,15 +354,18 @@ class BatchMCTS:
         self.dirichlet_alpha = dirichlet_alpha
         self.dirichlet_epsilon = dirichlet_epsilon
         self.batch_size = batch_size
+        self.fp16 = fp16
+        self._amp_device = 'cuda' if ('cuda' in device or device != 'cpu') else 'cpu'
 
     @torch.no_grad()
     def _evaluate_batch(self, states: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
-        """批量 NN 推理"""
+        """批量 NN 推理 (支持 FP16 混合精度)"""
         batch = torch.tensor(np.stack(states), dtype=torch.float32).to(self.device)
         self.model.eval()
-        logits, values = self.model(batch)
-        policies = logits.cpu().numpy()
-        values = values.cpu().numpy()
+        with torch.amp.autocast(self._amp_device, enabled=self.fp16):
+            logits, values = self.model(batch)
+        policies = logits.float().cpu().numpy()
+        values = values.float().cpu().numpy()
         return policies, values
 
     def search(self, state: np.ndarray, board: np.ndarray,

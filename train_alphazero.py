@@ -309,7 +309,8 @@ def train(args):
         augment_symmetry=True,
         opponent_pool=opponent_pool,
         mcts_batch_size=mcts_batch_size,
-        cpu_workers=args.cpu_workers
+        cpu_workers=args.cpu_workers,
+        fp16=args.fp16
     )
     self_play_manager.model_class = model_tag  # 告知管理器模型类型 (用于序列化)
 
@@ -522,7 +523,7 @@ def train(args):
                 board = np.zeros((board_size, board_size), dtype=np.int32)
                 board[state[0] == 1] = 1
                 board[state[1] == 1] = 2
-                mcts = MCTS(model, device, num_simulations=100)
+                mcts = MCTS(model, device, num_simulations=100, fp16=args.fp16)
                 return mcts.search(state, board, temperature=0.3, add_noise=False)
 
             def random_player(state):

@@ -53,7 +53,8 @@ class SelfPlayWorker:
                  dirichlet_alpha: float = 0.3,
                  temp_threshold: int = 30,
                  use_batch_mcts: bool = True,
-                 mcts_batch_size: int = 16):
+                 mcts_batch_size: int = 16,
+                 fp16: bool = False):
         """
         Args:
             model: 神经网络模型
@@ -66,6 +67,7 @@ class SelfPlayWorker:
             temp_threshold: 温度退火阈值 (前 N 步 τ=1.0, 之后 τ=0.1)
             use_batch_mcts: 是否使用批量 MCTS
             mcts_batch_size: 批量 MCTS 的 batch 大小
+            fp16: MCTS 推理是否使用 FP16 混合精度
         """
         self.model = model
         self.device = device
@@ -79,14 +81,16 @@ class SelfPlayWorker:
                 num_simulations=num_simulations,
                 c_puct=c_puct,
                 dirichlet_alpha=dirichlet_alpha,
-                batch_size=mcts_batch_size
+                batch_size=mcts_batch_size,
+                fp16=fp16
             )
         else:
             self.mcts = MCTS(
                 model, device,
                 num_simulations=num_simulations,
                 c_puct=c_puct,
-                dirichlet_alpha=dirichlet_alpha
+                dirichlet_alpha=dirichlet_alpha,
+                fp16=fp16
             )
 
     def play_one_game(self, game_id: int = 0,
@@ -248,7 +252,8 @@ class SelfPlayManager:
                  augment_symmetry: bool = True,
                  opponent_pool=None,
                  mcts_batch_size: int = 16,
-                 cpu_workers: int = 0):
+                 cpu_workers: int = 0,
+                 fp16: bool = False):
         """
         Args:
             model: 当前训练的模型
@@ -260,6 +265,7 @@ class SelfPlayManager:
             opponent_pool: 对手池
             mcts_batch_size: MCTS 批量推理大小
             cpu_workers: CPU 并行 worker 数 (0=串行GPU模式, >0=多进程CPU模式)
+            fp16: MCTS 推理是否使用 FP16 混合精度
         """
         self.model = model
         self.device = device
@@ -268,6 +274,7 @@ class SelfPlayManager:
         self.augment_symmetry = augment_symmetry
         self.cpu_workers = cpu_workers
         self.model_class = None  # 由外部设置 ('small' | 'standard')
+        self.fp16 = fp16
         self.opponent_pool = opponent_pool
         self.game_count = 0
         self._opponent_worker_cache = {}  # model_id → SelfPlayWorker 缓存
@@ -275,7 +282,8 @@ class SelfPlayManager:
         self.worker = SelfPlayWorker(
             model, device, board_size, win_condition,
             num_simulations=num_simulations,
-            mcts_batch_size=mcts_batch_size
+            mcts_batch_size=mcts_batch_size,
+            fp16=fp16
         )
 
     def update_model(self, model: nn.Module):
@@ -428,7 +436,8 @@ class SelfPlayManager:
                 opponent_model, self.device,
                 self.board_size, self.win_condition,
                 num_simulations=self.worker.mcts.num_simulations,
-                mcts_batch_size=self.worker.mcts.batch_size
+                mcts_batch_size=self.worker.mcts.batch_size,
+                fp16=self.fp16
             )
         opponent_worker = self._opponent_worker_cache[model_id]
 
