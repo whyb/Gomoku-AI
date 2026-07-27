@@ -22,6 +22,7 @@ import signal
 import argparse
 import random
 import warnings
+import threading
 import numpy as np
 from collections import deque
 from typing import List, Tuple
@@ -72,24 +73,43 @@ GAMMA = 1.0                    # 折扣因子 (AlphaZero 用 1.0, 不折扣)
 
 
 class ReplayBuffer:
-    """经验回放缓冲区"""
+    """经验回放缓冲区 (预分配 numpy 环形缓冲, 零拷贝采样)"""
 
-    def __init__(self, capacity: int = REPLAY_BUFFER_SIZE):
-        self.buffer = deque(maxlen=capacity)
+    def __init__(self, capacity: int = REPLAY_BUFFER_SIZE, board_size: int = 10):
+        self.capacity = capacity
+        self.board_size = board_size
+        self._states = np.empty((capacity, 2, board_size, board_size), dtype=np.float32)
+        self._policies = np.empty((capacity, board_size * board_size), dtype=np.float32)
+        self._values = np.empty(capacity, dtype=np.float32)
+        self._head = 0   # 下一个写入位置
+        self._size = 0   # 当前有效数据量
 
     def add(self, data: List[Tuple[np.ndarray, np.ndarray, float]]):
-        """添加一批训练数据"""
-        self.buffer.extend(data)
+        """添加一批训练数据 (不使用对称增强, 增强在采样时进行)"""
+        n = len(data)
+        if n == 0:
+            return
+        # 分批写入环形缓冲 (处理 n > capacity 的极端情况)
+        start = 0
+        while start < n:
+            chunk = min(n - start, self.capacity - self._head)
+            end = start + chunk
+            for i, (s, p, v) in enumerate(data[start:end]):
+                idx = self._head + i
+                self._states[idx] = s
+                self._policies[idx] = p
+                self._values[idx] = v
+            self._head = (self._head + chunk) % self.capacity
+            self._size = min(self._size + chunk, self.capacity)
+            start = end
 
     def sample(self, batch_size: int, board_size: int,
                augment: bool = True) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """采样一个 batch (含对称增强)"""
-        indices = np.random.choice(len(self.buffer), batch_size, replace=False)
-        batch = [self.buffer[i] for i in indices]
-
-        states = np.stack([b[0] for b in batch])
-        policies = np.stack([b[1] for b in batch])
-        values = np.array([b[2] for b in batch], dtype=np.float32)
+        """采样一个 batch (含对称增强, 零拷贝转换为 torch 张量)"""
+        indices = np.random.choice(self._size, batch_size, replace=False)
+        states = self._states[indices]    # (B, 2, H, W) 零拷贝视图
+        policies = self._policies[indices]  # (B, H*W)
+        values = self._values[indices]      # (B,)
 
         # 对称增强
         if augment:
@@ -97,12 +117,13 @@ class ReplayBuffer:
             states, policies_2d = SymmetryAugmenter.augment_batch(states, policies_2d)
             policies = policies_2d.reshape(-1, board_size * board_size)
 
-        return (torch.tensor(states, dtype=torch.float32),
-                torch.tensor(policies, dtype=torch.float32),
-                torch.tensor(values, dtype=torch.float32))
+        # 零拷贝: torch.from_numpy 共享内存, 避免先 CPU 再 .to(device) 的额外拷贝
+        return (torch.from_numpy(states.copy()),
+                torch.from_numpy(policies.copy()),
+                torch.from_numpy(values.copy()))
 
     def __len__(self):
-        return len(self.buffer)
+        return self._size
 
 
 def update_model_alphazero(model: nn.Module, optimizer: torch.optim.Optimizer,
@@ -263,7 +284,7 @@ def train(args):
     print("=" * 60)
 
     # Replay Buffer (内存中, 不持久化 — 太大了)
-    replay_buffer = ReplayBuffer(REPLAY_BUFFER_SIZE)
+    replay_buffer = ReplayBuffer(REPLAY_BUFFER_SIZE, board_size=board_size)
 
     # 对手池
     opponent_pool = OpponentPool(
@@ -287,8 +308,10 @@ def train(args):
         num_simulations=num_simulations,
         augment_symmetry=True,
         opponent_pool=opponent_pool,
-        mcts_batch_size=mcts_batch_size
+        mcts_batch_size=mcts_batch_size,
+        cpu_workers=args.cpu_workers
     )
+    self_play_manager.model_class = model_tag  # 告知管理器模型类型 (用于序列化)
 
     # Arena (评估用)
     arena = Arena(board_size, win_condition)
@@ -357,62 +380,118 @@ def train(args):
     print("\n开始训练... (Ctrl+C 停止)\n")
     print("-" * 100)
 
-    while running and total_games < args.max_games:
-        iter_start = time.time()
+    # ============================================================
+    # 后台训练线程 — 与自博弈流水线并行
+    # ============================================================
+    buffer_lock = threading.Lock()
+    train_running = True
+    train_stats = {'loss': 0.0, 'p_loss': 0.0, 'v_loss': 0.0, 'steps': 0}
+    sp_running = threading.Event()   # GPU 自博弈模式下的互斥信号
+    use_cpu_workers = args.cpu_workers > 0
 
-        # ---- 阶段 1: 自博弈生成数据 ----
-        sp_start = time.time()
-        model.eval()
-        with torch.no_grad():
-            game_data = self_play_manager.generate_games(GAMES_PER_ITERATION)
-        sp_time = time.time() - sp_start
+    def training_worker():
+        """后台训练线程: 持续从 buffer 采样并训练, 每次循环训练多步"""
+        nonlocal update_step
+        while train_running:
+            # GPU 自博弈模式下暂停训练 (共享 GPU)
+            if sp_running.is_set():
+                time.sleep(0.05)
+                continue
 
-        # 统计本局信息
-        num_games_this_iter = GAMES_PER_ITERATION
-        num_samples_this_iter = len(game_data)
-        # 每条原始经验 × 8 (对称增强) = 每步约 8 个样本
-        raw_steps = num_samples_this_iter // 8 if args.board_size > 5 else num_samples_this_iter
-        avg_game_len = raw_steps / max(1, num_games_this_iter)
+            # 连续训练多步 (不只在两次自博弈之间训一步)
+            trained_this_round = 0
+            while trained_this_round < 50 and train_running and not sp_running.is_set():
+                with buffer_lock:
+                    buf_len = len(replay_buffer)
+                    if buf_len >= batch_size * 2:
+                        batch = replay_buffer.sample(batch_size, board_size, augment=True)
+                    else:
+                        batch = None
 
-        total_games += num_games_this_iter
-        total_samples += num_samples_this_iter
-        total_mcts_sims += raw_steps * num_simulations  # 每步一次 MCTS 搜索
+                if batch is None:
+                    break
 
-        recent_selfplay_times.append(sp_time)
-        recent_game_lengths.append(avg_game_len)
-        recent_games_per_iter.append(num_games_this_iter)
-
-        # 添加到 replay buffer
-        replay_buffer.add(game_data)
-
-        # ---- 阶段 2: 训练 ----
-        train_start = time.time()
-        if len(replay_buffer) >= batch_size * 2:
-            model.train()
-            num_train_steps = max(1, num_samples_this_iter // batch_size)
-
-            total_loss = 0
-            total_policy_loss = 0
-            total_value_loss = 0
-
-            for _ in range(num_train_steps):
-                batch = replay_buffer.sample(batch_size, board_size, augment=True)
+                model.train()
                 loss, p_loss, v_loss = update_model_alphazero(
                     model, optimizer, scaler, batch, device,
                     fp16=args.fp16
                 )
                 scheduler.step()
-                update_step += 1
-                total_loss += loss
-                total_policy_loss += p_loss
-                total_value_loss += v_loss
+                with buffer_lock:
+                    update_step += 1
+                    train_stats['loss'] += loss
+                    train_stats['p_loss'] += p_loss
+                    train_stats['v_loss'] += v_loss
+                    train_stats['steps'] += 1
+                trained_this_round += 1
 
-            avg_loss = total_loss / num_train_steps
-            avg_p_loss = total_policy_loss / num_train_steps
-            avg_v_loss = total_value_loss / num_train_steps
+            if trained_this_round == 0:
+                time.sleep(0.1)
+
+    train_thread = threading.Thread(target=training_worker, daemon=True)
+    train_thread.start()
+
+    while running and total_games < args.max_games:
+        iter_start = time.time()
+
+        # ---- 阶段 1: 自博弈生成数据 ----
+        # GPU 模式: 暂停训练 (共用 GPU); CPU 并行模式: 训练继续
+        if not use_cpu_workers:
+            sp_running.set()
+        sp_start = time.time()
+        model.eval()
+        with torch.no_grad():
+            game_data = self_play_manager.generate_games(GAMES_PER_ITERATION)
+        sp_time = time.time() - sp_start
+        if not use_cpu_workers:
+            sp_running.clear()
+
+        num_games_this_iter = GAMES_PER_ITERATION
+        num_samples_this_iter = len(game_data)
+        raw_steps = num_samples_this_iter
+        avg_game_len = raw_steps / max(1, num_games_this_iter)
+
+        total_games += num_games_this_iter
+        total_samples += num_samples_this_iter
+        total_mcts_sims += raw_steps * num_simulations
+
+        recent_selfplay_times.append(sp_time)
+        recent_game_lengths.append(avg_game_len)
+        recent_games_per_iter.append(num_games_this_iter)
+
+        with buffer_lock:
+            replay_buffer.add(game_data)
+
+        # ---- 阶段 2: 训练统计收集 ----
+        # CPU 并行模式: 训练在自博弈期间已同步进行, 等待追上
+        # GPU 模式: 训练刚恢复, 等它跑几步
+        train_start = time.time()
+        if use_cpu_workers:
+            # 等待训练线程追上 (处理完 buffer 中积压的数据)
+            wait_start = time.time()
+            while time.time() - wait_start < 10.0:
+                with buffer_lock:
+                    if len(replay_buffer) < batch_size * 4:
+                        break
+                time.sleep(0.1)
         else:
-            avg_loss = avg_p_loss = avg_v_loss = 0
-            num_train_steps = 0
+            # GPU 模式: 让训练线程跑一小会
+            time.sleep(0.5)
+
+        with buffer_lock:
+            ts = train_stats['steps']
+            if ts > 0:
+                avg_loss = train_stats['loss'] / ts
+                avg_p_loss = train_stats['p_loss'] / ts
+                avg_v_loss = train_stats['v_loss'] / ts
+                num_train_steps = ts
+            else:
+                avg_loss = avg_p_loss = avg_v_loss = 0.0
+                num_train_steps = 0
+            train_stats['loss'] = 0.0
+            train_stats['p_loss'] = 0.0
+            train_stats['v_loss'] = 0.0
+            train_stats['steps'] = 0
 
         train_time = time.time() - train_start
         recent_train_times.append(train_time)
@@ -477,8 +556,9 @@ def train(args):
         elo_current = elo.get_rating('current')
         pool_size = len(opponent_pool.pool)
 
-        # 每轮都打印精简行
-        if total_games % (GAMES_PER_ITERATION * 5) == 0:
+        # 打印训练速度统计 (CPU 并行模式每轮打印, GPU 模式每 5 轮打印)
+        stats_interval = GAMES_PER_ITERATION if use_cpu_workers else GAMES_PER_ITERATION * 5
+        if total_games % stats_interval == 0:
             # 计算滑动平均
             avg_iter_time = sum(recent_iter_times) / len(recent_iter_times) if recent_iter_times else 0
             avg_sp_time = sum(recent_selfplay_times) / len(recent_selfplay_times) if recent_selfplay_times else 0
@@ -530,6 +610,8 @@ def train(args):
     # ============================================================
     # 清理
     # ============================================================
+    train_running = False
+    train_thread.join(timeout=5)
     print("\n训练结束，保存 checkpoint...")
     save_checkpoint('final')
     opponent_pool.print_pool_status()
@@ -575,6 +657,8 @@ def main():
                         help='模型大小: small(6层/64ch,快) 或 standard(10层/128ch,强)')
     parser.add_argument('--fp16', action='store_true',
                         help='使用 FP16 混合精度训练 (推荐 AMD GPU)')
+    parser.add_argument('--cpu_workers', type=int, default=0,
+                        help='CPU 并行 worker 数 (0=串行GPU模式, >0=多进程CPU自博弈)')
     args = parser.parse_args()
 
     update_config_from_cli(args)

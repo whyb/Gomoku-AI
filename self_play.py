@@ -247,7 +247,8 @@ class SelfPlayManager:
                  num_simulations: int = 400,
                  augment_symmetry: bool = True,
                  opponent_pool=None,
-                 mcts_batch_size: int = 16):
+                 mcts_batch_size: int = 16,
+                 cpu_workers: int = 0):
         """
         Args:
             model: 当前训练的模型
@@ -255,17 +256,21 @@ class SelfPlayManager:
             board_size: 棋盘大小
             win_condition: 连子数
             num_simulations: MCTS 模拟次数
-            augment_symmetry: 是否对称增强
-            opponent_pool: 对手池 (可选, 用于与历史模型对弈)
+            augment_symmetry: 是否对称增强 (已废弃, 统一在 ReplayBuffer 中做)
+            opponent_pool: 对手池
             mcts_batch_size: MCTS 批量推理大小
+            cpu_workers: CPU 并行 worker 数 (0=串行GPU模式, >0=多进程CPU模式)
         """
         self.model = model
         self.device = device
         self.board_size = board_size
         self.win_condition = win_condition
         self.augment_symmetry = augment_symmetry
+        self.cpu_workers = cpu_workers
+        self.model_class = None  # 由外部设置 ('small' | 'standard')
         self.opponent_pool = opponent_pool
         self.game_count = 0
+        self._opponent_worker_cache = {}  # model_id → SelfPlayWorker 缓存
 
         self.worker = SelfPlayWorker(
             model, device, board_size, win_condition,
@@ -282,37 +287,38 @@ class SelfPlayManager:
         """
         生成 N 局自博弈数据
 
-        Returns:
-            所有训练样本的列表 [(state, policy, value), ...]
+        当 cpu_workers > 0 时使用多进程并行 (CPU workers)
+        当 cpu_workers == 0 时使用串行 GPU 模式
         """
+        if self.cpu_workers > 0 and self.model_class is not None:
+            return self._generate_games_parallel(num_games)
+        return self._generate_games_sequential(num_games)
+
+    def _generate_games_sequential(self, num_games: int
+                                   ) -> List[Tuple[np.ndarray, np.ndarray, float]]:
+        """串行生成游戏 (GPU 模式, 原有逻辑)"""
         all_data = []
 
         for game_idx in range(num_games):
             game_start = time.time()
 
-            # 决定对手类型
             opponent_model = self._select_opponent()
 
             if opponent_model is not None:
-                # 与历史模型对弈
                 game_result = self._play_against_opponent(opponent_model)
                 opponent_type = 'history'
             else:
-                # 自博弈 (自己 vs 自己)
                 game_result = self.worker.play_one_game(game_id=self.game_count)
                 opponent_type = 'self'
 
             game_time = time.time() - game_start
             self.game_count += 1
 
-            # 转换为训练数据
             data = self.worker.generate_training_data(
-                game_result,
-                augment_symmetry=self.augment_symmetry
+                game_result, augment_symmetry=False
             )
             all_data.extend(data)
 
-            # 打印每局摘要 (每 5 局打印一次, 避免刷屏)
             if game_idx % 5 == 0:
                 winner_str = {1: 'P1', 2: 'P2', 0: 'Draw'}.get(game_result.winner, '?')
                 time_per_move = game_time / max(1, game_result.total_moves)
@@ -324,13 +330,82 @@ class SelfPlayManager:
                       f"samples={len(data):>5} ({samples_per_move:.0f}/move) | "
                       f"time={game_time:.1f}s ({time_per_move:.2f}s/move)")
 
-            # 检查是否需要更新对手池
             if self.opponent_pool and self.opponent_pool.should_update():
                 self.opponent_pool.add_model(
                     self.model,
                     model_id=f'step_{self.game_count}',
                     step=self.game_count
                 )
+
+        return all_data
+
+    def _generate_games_parallel(self, num_games: int
+                                 ) -> List[Tuple[np.ndarray, np.ndarray, float]]:
+        """多进程并行生成游戏 (CPU workers 模式)"""
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        # 准备模型权重 (序列化到 CPU)
+        model_state = {k: v.cpu().clone() for k, v in self.model.state_dict().items()}
+
+        # 构建每个 game 的配置
+        configs = []
+        for i in range(num_games):
+            game_id = self.game_count + i
+            opp_dict = None
+
+            opponent_model = self._select_opponent()
+            if opponent_model is not None:
+                opp_dict = {k: v.cpu().clone()
+                            for k, v in opponent_model.state_dict().items()}
+
+            configs.append({
+                'model_class': self.model_class,
+                'model_state_dict': model_state,
+                'board_size': self.board_size,
+                'win_condition': self.win_condition,
+                'num_simulations': self.worker.mcts.num_simulations,
+                'mcts_batch_size': self.worker.mcts.batch_size,
+                'game_id': game_id,
+                'num_games': 1,
+                'opponent_state_dict': opp_dict,
+            })
+
+        # 并行执行
+        all_data = []
+        completed_games = 0
+        executor = ProcessPoolExecutor(max_workers=self.cpu_workers)
+        try:
+            futures = {executor.submit(_cpu_self_play_worker, cfg): i
+                       for i, cfg in enumerate(configs)}
+
+            for future in as_completed(futures):
+                try:
+                    data = future.result()
+                    all_data.extend(data)
+                    completed_games += 1
+                    if completed_games % 5 == 0:
+                        print(f"    [Parallel] {completed_games}/{num_games} games done, "
+                              f"{len(all_data)} samples collected")
+                except KeyboardInterrupt:
+                    raise
+                except Exception as e:
+                    print(f"    [Parallel] Worker failed: {e}")
+        except KeyboardInterrupt:
+            print("\n    [Parallel] 收到中断信号, 等待 worker 进程退出...")
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        finally:
+            executor.shutdown(wait=False)
+            # 确保所有子进程被清理
+            import signal as _signal
+            try:
+                executor._processes
+            except Exception:
+                pass
+
+        self.game_count += num_games
+        print(f"    [Parallel] Batch complete: {num_games} games → "
+              f"{len(all_data)} samples ({len(all_data)/max(1,num_games):.0f}/game)")
 
         return all_data
 
@@ -345,12 +420,17 @@ class SelfPlayManager:
         return None
 
     def _play_against_opponent(self, opponent_model: nn.Module) -> GameResult:
-        """与历史模型对弈一局"""
-        opponent_worker = SelfPlayWorker(
-            opponent_model, self.device,
-            self.board_size, self.win_condition,
-            num_simulations=self.worker.mcts.num_simulations
-        )
+        """与历史模型对弈一局 (复用缓存的 opponent worker)"""
+        # 缓存复用: 避免每局游戏都创建新的 SelfPlayWorker + BatchMCTS
+        model_id = id(opponent_model)
+        if model_id not in self._opponent_worker_cache:
+            self._opponent_worker_cache[model_id] = SelfPlayWorker(
+                opponent_model, self.device,
+                self.board_size, self.win_condition,
+                num_simulations=self.worker.mcts.num_simulations,
+                mcts_batch_size=self.worker.mcts.batch_size
+            )
+        opponent_worker = self._opponent_worker_cache[model_id]
 
         board = np.zeros((self.board_size, self.board_size), dtype=np.int32)
         steps = []
@@ -393,3 +473,124 @@ class SelfPlayManager:
 
         return GameResult(winner=winner, steps=steps, total_moves=len(steps),
                          game_id=self.game_count)
+
+
+# ============================================================
+# 多进程自博弈 Worker (模块级函数, Windows spawn 可 pickle)
+# ============================================================
+
+def _cpu_self_play_worker(config: dict) -> list:
+    """
+    CPU-only 自博弈 Worker — 在子进程中运行, 不碰 GPU
+
+    Args:
+        config: dict with keys:
+            model_class: 'small' | 'standard'
+            model_state_dict: serialized state_dict
+            board_size, win_condition, num_simulations, mcts_batch_size
+            game_id: starting game id
+            num_games: how many games to generate (typically 1)
+            opponent_state_dict: optional opponent model state_dict
+    Returns:
+        list of (state, policy, value) tuples (raw, without symmetry augmentation)
+    """
+    import torch
+    torch.set_num_threads(1)  # 每 worker 只用 1 线程, 靠进程级并行
+
+    from model_alphazero import GomokuNetAlphaZero, GomokuNetAlphaZeroSmall
+
+    device = 'cpu'
+    board_size = config['board_size']
+    win_condition = config['win_condition']
+    num_simulations = config['num_simulations']
+    # CPU 推理时 batch_size 不宜过大 (GPU 上 256 合理, CPU 上 8-16 最优)
+    mcts_batch_size = min(config.get('mcts_batch_size', 16), 16)
+
+    # 创建主模型
+    if config['model_class'] == 'small':
+        model = GomokuNetAlphaZeroSmall().to(device)
+    else:
+        model = GomokuNetAlphaZero().to(device)
+    model.load_state_dict(config['model_state_dict'])
+    model.eval()
+
+    worker = SelfPlayWorker(
+        model, device, board_size, win_condition,
+        num_simulations=num_simulations,
+        mcts_batch_size=mcts_batch_size
+    )
+
+    all_data = []
+    for i in range(config.get('num_games', 1)):
+        game_id = config['game_id'] + i
+
+        # 如果有对手模型, 与对手对弈
+        opponent_dict = config.get('opponent_state_dict')
+        if opponent_dict is not None:
+            if config['model_class'] == 'small':
+                opp_model = GomokuNetAlphaZeroSmall().to(device)
+            else:
+                opp_model = GomokuNetAlphaZero().to(device)
+            opp_model.load_state_dict(opponent_dict)
+            opp_model.eval()
+
+            opp_worker = SelfPlayWorker(
+                opp_model, device, board_size, win_condition,
+                num_simulations=num_simulations,
+                mcts_batch_size=mcts_batch_size
+            )
+
+            # Run opponent game
+            game_result = _run_opponent_game(
+                worker, opp_worker, board_size, win_condition, game_id
+            )
+        else:
+            game_result = worker.play_one_game(game_id=game_id)
+
+        # 转换为训练数据 (不做对称增强)
+        data = worker.generate_training_data(game_result, augment_symmetry=False)
+        all_data.extend(data)
+
+    return all_data
+
+
+def _run_opponent_game(worker1, worker2, board_size, win_condition, game_id):
+    """在 CPU worker 中运行一场主模型 vs 对手模型的对弈"""
+    board = np.zeros((board_size, board_size), dtype=np.int32)
+    steps = []
+    current_player = 1
+    max_steps = board_size * board_size
+    winner = 0
+
+    for step in range(max_steps):
+        state = worker1._build_state(board, current_player)
+        temperature = 1.0 if step < worker1.temp_threshold else 0.1
+
+        if current_player == 1:
+            actions, probs = worker1.mcts.search(
+                state, board, temperature=temperature, add_noise=True
+            )
+        else:
+            actions, probs = worker2.mcts.search(
+                state, board, temperature=temperature, add_noise=True
+            )
+
+        full_policy = np.zeros(board_size * board_size, dtype=np.float32)
+        for a, p in zip(actions, probs):
+            full_policy[a] = p
+        steps.append(GameStep(state=state.copy(), policy=full_policy,
+                              player=current_player))
+
+        action_idx = np.random.choice(len(actions), p=probs)
+        action = actions[action_idx]
+        x, y = action // board_size, action % board_size
+        board[x, y] = current_player
+
+        if worker1._check_win(board, x, y):
+            winner = current_player
+            break
+
+        current_player = 3 - current_player
+
+    return GameResult(winner=winner, steps=steps, total_moves=len(steps),
+                      game_id=game_id)

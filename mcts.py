@@ -404,9 +404,10 @@ class BatchMCTS:
                 # SELECT
                 while node.is_expanded and node.children:
                     action, node = node.select_child_puct(self.c_puct)
-                    sim_board = self._apply_action_static(
-                        sim_board, action, node.parent.current_player
-                    )
+                    # 原地落子 (sim_board 已经是独立拷贝，无需再 copy)
+                    h, w = sim_board.shape
+                    x, y = action // w, action % w
+                    sim_board[x, y] = node.parent.current_player
                     search_path.append(node)
 
                 parent = search_path[-2] if len(search_path) >= 2 else root
