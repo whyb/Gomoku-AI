@@ -128,12 +128,19 @@ class SelfPlayWorker:
             # 温度退火
             temperature = 1.0 if step < self.temp_threshold else 0.1
 
-            # MCTS 搜索
-            actions, probs = self.mcts.search(
-                state, board,
-                temperature=temperature,
-                add_noise=True
-            )
+            # 黑方(P1)第一步必须落子天元(正中心) — 标准五子棋/连珠规则
+            if not board.any() and current_player == 1:
+                center = self.board_size // 2
+                action = center * self.board_size + center
+                actions = [action]
+                probs = np.array([1.0])
+            else:
+                # MCTS 搜索
+                actions, probs = self.mcts.search(
+                    state, board,
+                    temperature=temperature,
+                    add_noise=True
+                )
 
             # 记录 (state, policy, player)
             full_policy = np.zeros(self.board_size * self.board_size, dtype=np.float32)
@@ -482,8 +489,14 @@ class SelfPlayManager:
             state = self.worker._build_state(board, current_player)
             temperature = 1.0 if step < self.worker.temp_threshold else 0.1
 
+            # 黑方(P1)第一步必须落子天元(正中心) — 标准五子棋/连珠规则
+            if not board.any() and current_player == 1:
+                center = self.board_size // 2
+                action = center * self.board_size + center
+                actions = [action]
+                probs = np.array([1.0])
             # 选择当前玩家的 MCTS (主模型可能执 P1 或 P2)
-            if current_player == main_player:
+            elif current_player == main_player:
                 actions, probs = self.worker.mcts.search(
                     state, board, temperature=temperature, add_noise=True
                 )
@@ -613,7 +626,13 @@ def _run_opponent_game(worker1, worker2, board_size, win_condition, game_id):
         state = worker1._build_state(board, current_player)
         temperature = 1.0 if step < worker1.temp_threshold else 0.1
 
-        if current_player == main_player:
+        # 黑方(P1)第一步必须落子天元(正中心) — 标准五子棋/连珠规则
+        if not board.any() and current_player == 1:
+            center = board_size // 2
+            action = center * board_size + center
+            actions = [action]
+            probs = np.array([1.0])
+        elif current_player == main_player:
             actions, probs = worker1.mcts.search(
                 state, board, temperature=temperature, add_noise=True
             )
