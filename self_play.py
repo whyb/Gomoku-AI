@@ -36,6 +36,7 @@ class GameResult:
     steps: List[GameStep]
     total_moves: int
     game_id: int
+    main_player: int = 0    # 0=双方都是主模型(self-play), 1=P1是主模型, 2=P2是主模型
 
 
 class SelfPlayWorker:
@@ -164,7 +165,8 @@ class SelfPlayWorker:
             winner=winner,
             steps=steps,
             total_moves=len(steps),
-            game_id=game_id
+            game_id=game_id,
+            main_player=0  # self-play: 双方都是主模型
         )
 
     def generate_training_data(self, game_result: GameResult,
@@ -329,12 +331,17 @@ class SelfPlayManager:
 
             if game_idx % 5 == 0:
                 winner_str = {1: 'P1', 2: 'P2', 0: 'Draw'}.get(game_result.winner, '?')
+                mp = game_result.main_player
+                if mp == 0:
+                    opp_str = opponent_type
+                else:
+                    opp_str = f'{opponent_type}(M=P{mp})'
                 time_per_move = game_time / max(1, game_result.total_moves)
                 samples_per_move = len(data) / max(1, game_result.total_moves)
                 print(f"    Game {self.game_count:>4}: "
                       f"moves={game_result.total_moves:>3} | "
                       f"winner={winner_str:>4} | "
-                      f"opponent={opponent_type:>6} | "
+                      f"opponent={opp_str:>14} | "
                       f"samples={len(data):>5} ({samples_per_move:.0f}/move) | "
                       f"time={game_time:.1f}s ({time_per_move:.2f}s/move)")
 
@@ -440,7 +447,12 @@ class SelfPlayManager:
 
         使用 opponent_id (稳定标识) 而非 id(opponent_model) 作为缓存 key,
         避免因 sample_opponent 返回新对象导致缓存永远 miss 的显存泄露。
+
+        主模型随机执 P1(先手)或 P2(后手), 确保两种角色都得到训练。
         """
+        # 随机决定主模型执先手还是后手 (50%/50%)
+        main_player = 1 if np.random.random() < 0.5 else 2
+
         cache_key = opponent_id or str(id(opponent_model))
 
         # 限制缓存大小, 清理不活跃的旧条目 (防御性编程)
@@ -470,8 +482,8 @@ class SelfPlayManager:
             state = self.worker._build_state(board, current_player)
             temperature = 1.0 if step < self.worker.temp_threshold else 0.1
 
-            # 选择当前玩家的 MCTS
-            if current_player == 1:
+            # 选择当前玩家的 MCTS (主模型可能执 P1 或 P2)
+            if current_player == main_player:
                 actions, probs = self.worker.mcts.search(
                     state, board, temperature=temperature, add_noise=True
                 )
@@ -500,7 +512,7 @@ class SelfPlayManager:
             current_player = 3 - current_player
 
         return GameResult(winner=winner, steps=steps, total_moves=len(steps),
-                         game_id=self.game_count)
+                         game_id=self.game_count, main_player=main_player)
 
 
 # ============================================================
@@ -583,7 +595,14 @@ def _cpu_self_play_worker(config: dict) -> list:
 
 
 def _run_opponent_game(worker1, worker2, board_size, win_condition, game_id):
-    """在 CPU worker 中运行一场主模型 vs 对手模型的对弈"""
+    """在 CPU worker 中运行一场主模型 vs 对手模型的对弈
+
+    主模型随机执 P1(先手)或 P2(后手), 确保两种角色都得到训练。
+    worker1 = 主模型, worker2 = 对手模型
+    """
+    import random as _random
+    main_player = 1 if _random.random() < 0.5 else 2
+
     board = np.zeros((board_size, board_size), dtype=np.int32)
     steps = []
     current_player = 1
@@ -594,7 +613,7 @@ def _run_opponent_game(worker1, worker2, board_size, win_condition, game_id):
         state = worker1._build_state(board, current_player)
         temperature = 1.0 if step < worker1.temp_threshold else 0.1
 
-        if current_player == 1:
+        if current_player == main_player:
             actions, probs = worker1.mcts.search(
                 state, board, temperature=temperature, add_noise=True
             )
@@ -621,4 +640,4 @@ def _run_opponent_game(worker1, worker2, board_size, win_condition, game_id):
         current_player = 3 - current_player
 
     return GameResult(winner=winner, steps=steps, total_moves=len(steps),
-                      game_id=game_id)
+                      game_id=game_id, main_player=main_player)
