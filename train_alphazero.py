@@ -356,6 +356,10 @@ def train(args):
     # 训练循环
     # ============================================================
     start_time = time.time()
+    last_save_time = time.time()   # 时间触发自动保存
+    last_eval_time = time.time()   # 时间触发自动评估
+    save_interval_sec = args.save_interval_hours * 3600
+    eval_ran = False               # 追踪是否至少运行过一次评估
     running = True
 
     # 滑动窗口统计 (最近 N 轮)
@@ -501,21 +505,41 @@ def train(args):
         recent_iter_times.append(iter_time)
 
         # ---- 阶段 3: 定期保存 ----
+        need_save = False
+        save_reason = ''
         if update_step > 0 and update_step % SAVE_INTERVAL == 0:
+            need_save = True
+            save_reason = 'step'
+        elif (save_interval_sec > 0 and
+              time.time() - last_save_time >= save_interval_sec):
+            need_save = True
+            save_reason = 'time'
+            last_save_time = time.time()
+
+        if need_save:
             save_start = time.time()
             save_checkpoint('periodic')
-            save_time = time.time() - save_start
-            print(f"  [保存] Checkpoint 已保存 (step={update_step}, "
-                  f"games={total_games}, 耗时 {save_time:.1f}s)")
+            save_dur = time.time() - save_start
+            print(f"  [保存] Checkpoint 已保存 (trigger={save_reason}, "
+                  f"step={update_step}, games={total_games}, "
+                  f"耗时 {save_dur:.1f}s)")
 
-            # 添加到对手池
-            opponent_pool.add_model(
-                model, model_id=f'step_{update_step}',
-                step=update_step
-            )
+            # 添加到对手池 (仅在 step 触发时添加，避免过频)
+            if save_reason == 'step':
+                opponent_pool.add_model(
+                    model, model_id=f'step_{update_step}',
+                    step=update_step
+                )
 
         # ---- 阶段 4: 定期评估 ----
+        need_eval = False
         if update_step > 0 and update_step % EVAL_INTERVAL == 0:
+            need_eval = True
+        elif time.time() - last_eval_time >= 7200:  # 每 2 小时评估一次
+            need_eval = True
+            last_eval_time = time.time()
+
+        if need_eval:
             eval_start = time.time()
             model.eval()
 
@@ -549,6 +573,7 @@ def train(args):
                     elo.update('current', 'random')
                 else:
                     elo.update('random', 'current')
+            eval_ran = True
 
         # ---- 打印详细状态 ----
         elapsed = time.time() - start_time
@@ -615,6 +640,39 @@ def train(args):
     train_thread.join(timeout=5)
     print("\n训练结束，保存 checkpoint...")
     save_checkpoint('final')
+
+    # 如果训练期间从未评估过，退出前强制运行一次 (Elo 表需要数据)
+    if not eval_ran:
+        print("\n训练期间未触发评估，退出前强制评估...")
+        model.eval()
+
+        def mcts_player_final(state):
+            board = np.zeros((board_size, board_size), dtype=np.int32)
+            board[state[0] == 1] = 1
+            board[state[1] == 1] = 2
+            mcts = MCTS(model, device, num_simulations=100, fp16=args.fp16)
+            return mcts.search(state, board, temperature=0.3, add_noise=False)
+
+        def random_player_final(state):
+            valid = []
+            for i in range(board_size):
+                for j in range(board_size):
+                    if state[0, i, j] == 0 and state[1, i, j] == 0:
+                        valid.append(i * board_size + j)
+            probs = np.ones(len(valid)) / len(valid)
+            return valid, probs
+
+        result = arena.play_match(mcts_player_final, random_player_final,
+                                  num_games=GAMES_PER_EVAL)
+        print(f"  [最终评估] vs 随机: 胜率={result['p1_win_rate']:.1%} "
+              f"(先手={result['p1_first_win_rate']:.1%}, "
+              f"后手={result['p1_second_win_rate']:.1%})")
+        for _ in range(10):
+            if result['p1_win_rate'] > 0.5:
+                elo.update('current', 'random')
+            else:
+                elo.update('random', 'current')
+
     opponent_pool.print_pool_status()
     elo.print_leaderboard()
 
@@ -660,6 +718,8 @@ def main():
                         help='使用 FP16 混合精度训练 (推荐 AMD GPU)')
     parser.add_argument('--cpu_workers', type=int, default=0,
                         help='CPU 并行 worker 数 (0=串行GPU模式, >0=多进程CPU自博弈)')
+    parser.add_argument('--save_interval_hours', type=float, default=1.0,
+                        help='自动保存间隔 (小时, 默认 1.0, 设为 0 禁用)')
     args = parser.parse_args()
 
     update_config_from_cli(args)
