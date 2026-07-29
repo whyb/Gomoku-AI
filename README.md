@@ -57,6 +57,11 @@ pip install -r requirements.txt
 ### 训练模型
 
 运行以下命令开始训练模型，需指定棋盘尺寸和胜利条件：
+
+#### 老版本训练（不推荐）
+<details>
+  <summary>老版本训练命令（不推荐）点击此处展开</summary>
+
 ```shell
 # 8x8棋盘，连5子胜利，固定shape模型，最终只能导出8x8的推理模型
 python train.py --board_size 8 --win_condition 5
@@ -72,16 +77,20 @@ python train_dy.py --board_size 8 --win_condition 5
 
 训练结束后会生成 `gobang_best_model.pth`（静态shape模型）、`gobang_best_model_dy.pth`（动态shape模型） 作为最终权重文件，支持从该文件继续开始训练
 
+
+</details>
+
+
 #### AlphaZero 风格训练（推荐）
 
 基于 AlphaZero 的训练流水线，通过 **MCTS 自博弈** 替代固定对手训练，能够持续进化：
 
 ```shell
-# 使用小型 SE-ResNet 模型（64通道，6层，~460K 参数）— 适合快速实验
-python train_alphazero.py --board_size 10 --model small --num_simulations 200
+# 标准模型 15×15 棋盘训练（推荐正式训练）
+python train_alphazero.py --board_size 15 --num_simulations 400 --model standard --fp16
 
-# 使用标准 SE-ResNet 模型（128通道，10层，~3M 参数）— 推荐正式训练
-python train_alphazero.py --board_size 15 --num_simulations 400
+# 小模型 15×15 棋盘训练（快速实验）
+python train_alphazero.py --board_size 15 --num_simulations 400 --model small --fp16
 
 ```
 
@@ -89,13 +98,24 @@ python train_alphazero.py --board_size 15 --num_simulations 400
 
 | 场景 | 小模型 `--model small` | 标准模型 `--model standard` | 预期水平 |
 | :--- | :--- | :--- | :--- |
-| 🟢 入门 | 5,000–10,000 | — | 能稳定击败随机走子，开始展现基本连五意识 |
-| 🟡 业余 | 30,000–50,000 | ~50,000 | 掌握活三、冲四等基本战术，能赢普通休闲玩家 |
-| 🟠 强业余 | 80,000–100,000 | 150,000–200,000 | 战术意识成熟，能击败大多数人类玩家；**小模型接近容量上限** |
+| 🟢 入门 | 5,000–10,000 | — | 能稳定击败随机走子 |
+| 🟡 业余 | 30,000–50,000 | ~50,000 | 掌握活三、冲四等基本战术 |
+| 🟠 强业余 | 80,000–100,000 | 150,000–200,000 | 战术意识成熟，击败大多数人类；**小模型接近容量上限** |
 | 🔴 高手 | >300,000（不推荐） | 300,000–500,000 | 战术判断精准，攻守平衡 |
 | 🏆 超人类 | 达不到 | 1,000,000+ | 接近该架构的理论上限 |
 
 > **建议**：15×15 棋盘推荐使用 `--model standard`（128 通道、10 层 SE-ResNet、~3M 参数）。小模型 (~460K 参数) 受限于容量，在 15×15 棋盘上无论训练多少盘都难以突破强业余水平。
+
+#### 训练产出文件
+
+训练过程中会自动保存以下文件（以标准模型为例）：
+
+| 文件 | 说明 |
+|------|------|
+| `alpaz_standard_15x15_model.pth` | 纯模型权重（用于导出 ONNX） |
+| `alpaz_standard_15x15_checkpoint.pth` | 完整断点（含优化器/调度器状态，可续训） |
+| `alpaz_standard_15x15_opponent_pool.pth` | 对手池（含历史模型快照） |
+| `alpaz_standard_15x15_elo.json` | Elo 评分记录 |
 
 与传统训练方式相比，AlphaZero 流水线具备以下特性：
 
@@ -282,7 +302,11 @@ O X X . .
 
 您可以将训练好的模型转换为 ONNX 格式 和 torchscript 模型（需指定棋盘尺寸和胜利条件）：
 
-#### 静态shape模型
+#### 静态shape模型（老版本，不推荐）
+
+<details>
+  <summary>点击此处展开</summary>
+
 ```shell
 # 基础用法（8x8棋盘，连5子胜利）
 python export_onnx.py gobang_best_model.pth --board_size 8 --win_condition 5
@@ -291,9 +315,16 @@ python export_onnx.py gobang_best_model.pth --board_size 8 --win_condition 5
 python export_onnx.py gobang_best_model.pth \
   --board_size 8 --win_condition 5 \
   --onnx_path ./webdemo/model_bs8_win5.onnx
-
 ```
-#### 动态shape模型（推荐）
+
+</details>
+
+
+#### 动态shape模型（老版本，不推荐）
+
+<details>
+  <summary>点击此处展开</summary>
+
 ```shell
 # 基础用法（15x15棋盘，连5子胜利）
 python export_onnx_dy.py gobang_best_model_dy.pth --board_size 15 --win_condition 5
@@ -302,18 +333,20 @@ python export_onnx_dy.py gobang_best_model_dy.pth --board_size 15 --win_conditio
 python export_onnx_dy.py gobang_best_model_dy.pth \
   --board_size 15 \
   --onnx_path ./webdemo/model_bs15_win5.onnx
-
 ```
-#### AlphaZero 模型导出
-```shell
-# 导出 Small 模型
-python export_onnx_az.py alpaz_small_15x15_model.pth --board_size 15 --model small
 
+</details>
+
+#### AlphaZero 模型导出（推荐）
+```shell
 # 导出 Standard 模型
 python export_onnx_az.py alpaz_standard_15x15_model.pth --board_size 15 --model standard
 
-# 自定义输出路径
-python export_onnx_az.py alpaz_small_15x15_model.pth --board_size 15 --model small --onnx_path ./webdemo/az_model.onnx
+# 导出 Small 模型
+python export_onnx_az.py alpaz_small_15x15_model.pth --board_size 15 --model small
+
+# 自定义输出路径（供 Web Demo 使用）
+python export_onnx_az.py alpaz_standard_15x15_model.pth --board_size 15 --model standard --onnx_path ./webdemo/model_bs15_win5.onnx
 ```
 
 导出onnx执行成功后，会在目录中产生 `gobang_az_*_*x*.onnx` 和 `gobang_az_*_*x*.pt` 文件，后续就可以使用webdemo/下面的人机对战程序进行测试。
