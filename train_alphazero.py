@@ -52,7 +52,7 @@ warnings.filterwarnings(
 from config import Config, update_config_from_cli
 from model_alphazero import GomokuNetAlphaZero, GomokuNetAlphaZeroSmall
 from model_dy import load_model_if_exists
-from mcts import MCTS, BatchMCTS
+from mcts import MCTS, BatchMCTS, get_forced_move
 from self_play import SelfPlayWorker, SelfPlayManager
 from symmetry import SymmetryAugmenter
 from opponent_pool import OpponentPool
@@ -547,6 +547,13 @@ def train(args):
                 board = np.zeros((board_size, board_size), dtype=np.int32)
                 board[state[0] == 1] = 1
                 board[state[1] == 1] = 2
+                # 推断当前玩家
+                p1_count = (board == 1).sum()
+                p2_count = (board == 2).sum()
+                current_player = 1 if p1_count == p2_count else 2
+                forced_action, _ = get_forced_move(board, current_player, win_condition)
+                if forced_action is not None:
+                    return [forced_action], np.array([1.0])
                 mcts = MCTS(model, device, num_simulations=100, fp16=args.fp16)
                 return mcts.search(state, board, temperature=0.3, add_noise=False)
 
@@ -650,6 +657,13 @@ def train(args):
             board = np.zeros((board_size, board_size), dtype=np.int32)
             board[state[0] == 1] = 1
             board[state[1] == 1] = 2
+            # 推断当前玩家
+            p1_count = (board == 1).sum()
+            p2_count = (board == 2).sum()
+            current_player = 1 if p1_count == p2_count else 2
+            forced_action, _ = get_forced_move(board, current_player, win_condition)
+            if forced_action is not None:
+                return [forced_action], np.array([1.0])
             mcts = MCTS(model, device, num_simulations=100, fp16=args.fp16)
             return mcts.search(state, board, temperature=0.3, add_noise=False)
 

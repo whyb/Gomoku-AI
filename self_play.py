@@ -17,7 +17,7 @@ import torch.nn as nn
 from typing import List, Tuple, Optional, Dict
 from dataclasses import dataclass
 
-from mcts import MCTS, BatchMCTS
+from mcts import MCTS, BatchMCTS, get_forced_move
 from symmetry import SymmetryAugmenter
 
 
@@ -135,12 +135,20 @@ class SelfPlayWorker:
                 actions = [action]
                 probs = np.array([1.0])
             else:
-                # MCTS 搜索
-                actions, probs = self.mcts.search(
-                    state, board,
-                    temperature=temperature,
-                    add_noise=True
+                # 规则短路：检查强制走法（立即获胜 / 必须防守）
+                forced_action, reason = get_forced_move(
+                    board, current_player, self.win_condition
                 )
+                if forced_action is not None:
+                    actions = [forced_action]
+                    probs = np.array([1.0])
+                else:
+                    # MCTS 搜索
+                    actions, probs = self.mcts.search(
+                        state, board,
+                        temperature=temperature,
+                        add_noise=True
+                    )
 
             # 记录 (state, policy, player)
             full_policy = np.zeros(self.board_size * self.board_size, dtype=np.float32)
@@ -495,15 +503,23 @@ class SelfPlayManager:
                 action = center * self.board_size + center
                 actions = [action]
                 probs = np.array([1.0])
-            # 选择当前玩家的 MCTS (主模型可能执 P1 或 P2)
-            elif current_player == main_player:
-                actions, probs = self.worker.mcts.search(
-                    state, board, temperature=temperature, add_noise=True
-                )
             else:
-                actions, probs = opponent_worker.mcts.search(
-                    state, board, temperature=temperature, add_noise=True
+                # 规则短路：检查强制走法
+                forced_action, reason = get_forced_move(
+                    board, current_player, self.win_condition
                 )
+                if forced_action is not None:
+                    actions = [forced_action]
+                    probs = np.array([1.0])
+                # 选择当前玩家的 MCTS (主模型可能执 P1 或 P2)
+                elif current_player == main_player:
+                    actions, probs = self.worker.mcts.search(
+                        state, board, temperature=temperature, add_noise=True
+                    )
+                else:
+                    actions, probs = opponent_worker.mcts.search(
+                        state, board, temperature=temperature, add_noise=True
+                    )
 
             # 记录
             full_policy = np.zeros(self.board_size * self.board_size, dtype=np.float32)
@@ -632,14 +648,22 @@ def _run_opponent_game(worker1, worker2, board_size, win_condition, game_id):
             action = center * board_size + center
             actions = [action]
             probs = np.array([1.0])
-        elif current_player == main_player:
-            actions, probs = worker1.mcts.search(
-                state, board, temperature=temperature, add_noise=True
-            )
         else:
-            actions, probs = worker2.mcts.search(
-                state, board, temperature=temperature, add_noise=True
+            # 规则短路：检查强制走法
+            forced_action, reason = get_forced_move(
+                board, current_player, win_condition
             )
+            if forced_action is not None:
+                actions = [forced_action]
+                probs = np.array([1.0])
+            elif current_player == main_player:
+                actions, probs = worker1.mcts.search(
+                    state, board, temperature=temperature, add_noise=True
+                )
+            else:
+                actions, probs = worker2.mcts.search(
+                    state, board, temperature=temperature, add_noise=True
+                )
 
         full_policy = np.zeros(board_size * board_size, dtype=np.float32)
         for a, p in zip(actions, probs):
