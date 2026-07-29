@@ -344,7 +344,7 @@ class SelfPlayManager:
             )
             all_data.extend(data)
 
-            if game_idx % 5 == 0:
+            if game_idx % 5 == 0 or True:
                 winner_str = {1: 'P1', 2: 'P2', 0: 'Draw'}.get(game_result.winner, '?')
                 mp = game_result.main_player
                 if mp == 0:

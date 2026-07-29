@@ -66,7 +66,7 @@ from opening_book import OpeningBook
 REPLAY_BUFFER_SIZE = 200000    # Replay buffer 容量
 SAVE_INTERVAL = 2000           # 每 N 步保存一次
 EVAL_INTERVAL = 5000           # 每 N 步评估一次
-GAMES_PER_EVAL = 40            # 评估对局数
+GAMES_PER_EVAL = 1             # 评估对局数
 GAMES_PER_ITERATION = 16       # 每次迭代生成的对局数
 L2_COEFF = 1e-4                # L2 正则系数
 GAMMA = 1.0                    # 折扣因子 (AlphaZero 用 1.0, 不折扣)
@@ -209,6 +209,7 @@ def train(args):
     total_samples = 0
     total_mcts_sims = 0
     resume_info = ""
+    ckpt = None  # 在外层作用域保存，后续恢复优化器/scheduler 时复用
 
     if os.path.exists(checkpoint_path):
         print(f"发现 checkpoint: {checkpoint_path}")
@@ -221,7 +222,11 @@ def train(args):
         total_games = ckpt.get('total_games', 0)
         total_samples = ckpt.get('total_samples', 0)
         total_mcts_sims = ckpt.get('total_mcts_sims', 0)
-        resume_info = f"从 step={update_step}, games={total_games} 恢复"
+        # 恢复 LR 调度器配置 (需在创建 scheduler 之前，确保闭包捕获正确的值)
+        for key in ['decay_steps', 'warmup_steps', 'lr_min', 'learning_rate']:
+            if key in ckpt:
+                setattr(args, key, ckpt[key])
+        resume_info = f"从 step={update_step}, games={total_games} 恢复, decay_steps={args.decay_steps}"
         print(f"  {resume_info}")
     elif os.path.exists(model_path):
         load_model_if_exists(model, model_path)
@@ -237,29 +242,38 @@ def train(args):
     )
     scaler = GradScaler('cuda')
 
-    # LR 调度器: 预热 + 余弦退火
+    # LR 调度器: 余弦退火 + 自动热重启 (每个周期峰值减半, 预热仅首周期)
     def lr_lambda(step):
-        if step < args.warmup_steps:
-            return step / max(1, args.warmup_steps)
-        progress = (step - args.warmup_steps) / max(1, args.decay_steps - args.warmup_steps)
-        return max(args.lr_min / args.learning_rate,
-                   0.5 * (1 + np.cos(np.pi * progress)))
+        cycle_length = max(1, args.decay_steps)
+        cycle = step // cycle_length
+        step_in_cycle = step % cycle_length
+
+        # 预热仅在第一周期
+        if step_in_cycle < args.warmup_steps and cycle == 0:
+            return step_in_cycle / max(1, args.warmup_steps)
+
+        progress = min(1.0, (step_in_cycle - args.warmup_steps) /
+                       max(1, cycle_length - args.warmup_steps))
+        cos_val = 0.5 * (1 + np.cos(np.pi * progress))
+
+        # 每个周期峰值减半: lr_peak = initial_lr × 0.5^cycle
+        restart_factor = 0.5 ** cycle
+        final_factor = args.lr_min / args.learning_rate
+        return final_factor + (restart_factor - final_factor) * cos_val
 
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
-    # 恢复优化器和调度器状态
-    if os.path.exists(checkpoint_path):
-        ckpt_resume = torch.load(checkpoint_path, map_location=device, weights_only=False)
-        if 'optimizer_state_dict' in ckpt_resume:
-            optimizer.load_state_dict(ckpt_resume['optimizer_state_dict'])
+    # 恢复优化器和调度器状态 (复用上方已加载的 ckpt)
+    if ckpt is not None:
+        if 'optimizer_state_dict' in ckpt:
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
             print("  恢复优化器状态")
-        if 'scheduler_state_dict' in ckpt_resume:
-            scheduler.load_state_dict(ckpt_resume['scheduler_state_dict'])
+        if 'scheduler_state_dict' in ckpt:
+            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
             print("  恢复学习率调度器状态")
-        if 'scaler_state_dict' in ckpt_resume:
-            scaler.load_state_dict(ckpt_resume['scaler_state_dict'])
+        if 'scaler_state_dict' in ckpt:
+            scaler.load_state_dict(ckpt['scaler_state_dict'])
             print("  恢复 AMP scaler 状态")
-        del ckpt_resume
 
     # 打印启动信息
     print("=" * 60)
@@ -342,6 +356,11 @@ def train(args):
             'num_simulations': num_simulations,
             'batch_size': batch_size,
             'model_tag': model_tag,
+            # LR 调度器配置 (用于续训时自动恢复)
+            'decay_steps': args.decay_steps,
+            'warmup_steps': args.warmup_steps,
+            'lr_min': args.lr_min,
+            'learning_rate': args.learning_rate,
             # 时间戳
             'save_time': time.time(),
         }, checkpoint_path)
@@ -591,7 +610,7 @@ def train(args):
 
         # 打印训练速度统计 (CPU 并行模式每轮打印, GPU 模式每 5 轮打印)
         stats_interval = GAMES_PER_ITERATION if use_cpu_workers else GAMES_PER_ITERATION * 5
-        if total_games % stats_interval == 0:
+        if total_games % stats_interval == 0 or True:
             # 计算滑动平均
             avg_iter_time = sum(recent_iter_times) / len(recent_iter_times) if recent_iter_times else 0
             avg_sp_time = sum(recent_selfplay_times) / len(recent_selfplay_times) if recent_selfplay_times else 0
