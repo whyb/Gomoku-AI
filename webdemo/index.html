@@ -94,11 +94,11 @@
             <div class="flex gap-4">
                 <div class="flex items-center gap-2">
                     <div class="w-4 h-4 rounded-full piece-black shadow-sm"></div>
-                    <span class="text-xs font-bold">玩家</span>
+                    <span id="labelP1" class="text-xs font-bold">玩家(黑)</span>
                 </div>
                 <div class="flex items-center gap-2">
                     <div class="w-4 h-4 rounded-full piece-white shadow-sm"></div>
-                    <span class="text-xs font-bold">AI</span>
+                    <span id="labelP2" class="text-xs font-bold">AI(白)</span>
                 </div>
             </div>
             <div class="flex items-center gap-3">
@@ -157,7 +157,9 @@
             gameOver: false,
             model: null,
             isAIMoving: false,
-            lastMove: -1
+            lastMove: -1,
+            humanPlayer: 1,    // 默认人类执黑(先手), AI执白(后手)
+            aiPlayer: 2
         };
 
         function drawGrid() {
@@ -185,9 +187,9 @@
 
         function handleMove(index) {
             if (gameState.gameOver || gameState.board[index] !== 0 || gameState.isAIMoving) return;
-            
-            placePiece(index, 1);
-            if (checkGameOver(1)) return;
+
+            placePiece(index, gameState.humanPlayer);
+            if (checkGameOver(gameState.humanPlayer)) return;
 
             gameState.isAIMoving = true;
             document.getElementById('status').innerText = 'AI 正在思考...';
@@ -215,9 +217,10 @@
         async function aiLogic() {
             try {
                 let bestMove = -1;
-                // AI 开局策略：如果棋盘是空的，下中心
+                // AI 先手(执黑)时：棋盘为空，第一步必须落子天元(正中心)
                 if (gameState.board.filter(x => x!==0).length === 0) {
-                    bestMove = 112; 
+                    const center = Math.floor(BOARD_SIZE / 2);
+                    bestMove = center * BOARD_SIZE + center;
                 } else {
                     const input = new Float32Array(BOARD_SQUARE * 2).fill(0);
                     gameState.board.forEach((val, i) => {
@@ -235,8 +238,8 @@
                         }
                     }
                 }
-                placePiece(bestMove, 2);
-                if (!checkGameOver(2)) {
+                placePiece(bestMove, gameState.aiPlayer);
+                if (!checkGameOver(gameState.aiPlayer)) {
                     document.getElementById('status').innerText = '请落子...';
                     gameState.isAIMoving = false;
                 }
@@ -252,19 +255,20 @@
 
             if (isWin || isDraw) {
                 gameState.gameOver = true;
-                document.getElementById('status').innerText = isWin ? (player === 1 ? '你赢了！' : 'AI 获胜') : '平局';
+                const isHumanWin = isWin && player === gameState.humanPlayer;
+                document.getElementById('status').innerText = isWin ? (isHumanWin ? '你赢了！' : 'AI 获胜') : '平局';
                 document.getElementById('status').classList.remove('animate-pulse');
-                
+
                 setTimeout(() => {
                     const modal = document.getElementById('resultModal');
                     const title = document.getElementById('resultTitle');
                     const msg = document.getElementById('resultMsg');
                     const icon = document.getElementById('resultIcon');
-                    
+
                     if (isWin) {
-                        icon.innerText = player === 1 ? '🎉' : '🤖';
-                        title.innerText = player === 1 ? '你太厉害了！' : '哈哈你输了！';
-                        msg.innerText = player === 1 ? '在对阵AI中获得了胜利。' : '继续努力吧！';
+                        icon.innerText = isHumanWin ? '🎉' : '🤖';
+                        title.innerText = isHumanWin ? '你太厉害了！' : '哈哈你输了！';
+                        msg.innerText = isHumanWin ? '在对阵AI中获得了胜利。' : '继续努力吧！';
                     } else {
                         icon.innerText = '🤝';
                         title.innerText = '握手言和';
@@ -371,16 +375,37 @@
             }
         }
 
+        function updateLegend() {
+            if (gameState.humanPlayer === 1) {
+                document.getElementById('labelP1').innerText = '玩家(黑)';
+                document.getElementById('labelP2').innerText = 'AI(白)';
+            } else {
+                document.getElementById('labelP1').innerText = 'AI(黑)';
+                document.getElementById('labelP2').innerText = '玩家(白)';
+            }
+        }
+
         function reset() {
             gameState.board = Array(BOARD_SQUARE).fill(0);
             gameState.gameOver = false;
             gameState.isAIMoving = false;
             gameState.lastMove = -1;
+
+            const aiFirst = document.getElementById('aiFirst').checked;
+            if (aiFirst) {
+                gameState.humanPlayer = 2;   // 人类执白(后手)
+                gameState.aiPlayer = 1;      // AI 执黑(先手)
+            } else {
+                gameState.humanPlayer = 1;   // 人类执黑(先手)
+                gameState.aiPlayer = 2;      // AI 执白(后手)
+            }
+            updateLegend();
+
             document.getElementById('resultModal').classList.add('hidden');
             document.getElementById('status').classList.add('animate-pulse');
             initInteractions();
-            
-            if (document.getElementById('aiFirst').checked) {
+
+            if (aiFirst) {
                 gameState.isAIMoving = true;
                 document.getElementById('status').innerText = 'AI 思考开局...';
                 setTimeout(aiLogic, 1);
