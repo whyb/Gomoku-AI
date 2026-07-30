@@ -438,7 +438,9 @@ class MCTS:
                                 self.dirichlet_epsilon * noise[noise_idx]
                     noise_idx += 1
 
-        root.expand(policy, valid_actions, current_player=1)
+        # 从棋盘推导当前玩家: P1 先手, 棋子数相等→P1, 否则 P2
+        current_player = 1 if (board == 1).sum() == (board == 2).sum() else 2
+        root.expand(policy, valid_actions, current_player=current_player)
 
         # 主搜索循环
         for sim in range(self.num_simulations):
@@ -610,7 +612,9 @@ class BatchMCTS:
                                 self.dirichlet_epsilon * noise[noise_idx]
                     noise_idx += 1
 
-        root.expand(policy, valid_actions, current_player=1)
+        # 从棋盘推导当前玩家: P1 先手, 棋子数相等→P1, 否则 P2
+        current_player = 1 if (board == 1).sum() == (board == 2).sum() else 2
+        root.expand(policy, valid_actions, current_player=current_player)
 
         sim_count = 0
         while sim_count < self.num_simulations:
