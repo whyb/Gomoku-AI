@@ -324,7 +324,8 @@ def train(args):
         opponent_pool=opponent_pool,
         mcts_batch_size=mcts_batch_size,
         cpu_workers=args.cpu_workers,
-        fp16=args.fp16
+        fp16=args.fp16,
+        use_human_knowledge=args.mcts_human_knowledge
     )
     self_play_manager.model_class = model_tag  # 告知管理器模型类型 (用于序列化)
 
@@ -573,7 +574,8 @@ def train(args):
                 forced_action, _ = get_forced_move(board, current_player, win_condition)
                 if forced_action is not None:
                     return [forced_action], np.array([1.0])
-                mcts = MCTS(model, device, num_simulations=100, fp16=args.fp16)
+                mcts = MCTS(model, device, num_simulations=100, fp16=args.fp16,
+                            win_condition=win_condition)
                 return mcts.search(state, board, temperature=0.3, add_noise=False)
 
             def random_player(state):
@@ -683,7 +685,8 @@ def train(args):
             forced_action, _ = get_forced_move(board, current_player, win_condition)
             if forced_action is not None:
                 return [forced_action], np.array([1.0])
-            mcts = MCTS(model, device, num_simulations=100, fp16=args.fp16)
+            mcts = MCTS(model, device, num_simulations=100, fp16=args.fp16,
+                        win_condition=win_condition)
             return mcts.search(state, board, temperature=0.3, add_noise=False)
 
         def random_player_final(state):
@@ -729,9 +732,9 @@ def main():
     parser.add_argument('--win_condition', type=int, default=5,
                         help='连子数 (默认 5)')
     parser.add_argument('--num_simulations', type=int, default=200,
-                        help='MCTS 模拟次数 (默认 200, 基准测试最优)')
+                        help='MCTS 模拟次数 (默认 200)')
     parser.add_argument('--mcts_batch_size', type=int, default=256,
-                        help='MCTS 批量推理大小 (默认 256, 基准测试最优)')
+                        help='MCTS 批量推理大小 (默认 256)')
     parser.add_argument('--learning_rate', type=float, default=2e-3,
                         help='初始学习率 (默认 2e-3)')
     parser.add_argument('--lr_min', type=float, default=1e-5,
@@ -751,6 +754,8 @@ def main():
                         help='使用 FP16 混合精度训练 (推荐 AMD GPU)')
     parser.add_argument('--cpu_workers', type=int, default=0,
                         help='CPU 并行 worker 数 (0=串行GPU模式, >0=多进程CPU自博弈)')
+    parser.add_argument('--mcts_human_knowledge', action='store_true',
+                        help='在 MCTS 搜索树中启用人类知识增强 (连五/挡四/活三检测), 默认关闭')
     parser.add_argument('--save_interval_hours', type=float, default=1.0,
                         help='自动保存间隔 (小时, 默认 1.0, 设为 0 禁用)')
     args = parser.parse_args()

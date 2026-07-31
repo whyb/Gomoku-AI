@@ -55,7 +55,8 @@ class SelfPlayWorker:
                  temp_threshold: int = 30,
                  use_batch_mcts: bool = True,
                  mcts_batch_size: int = 16,
-                 fp16: bool = False):
+                 fp16: bool = False,
+                 use_human_knowledge: bool = False):
         """
         Args:
             model: 神经网络模型
@@ -69,6 +70,7 @@ class SelfPlayWorker:
             use_batch_mcts: 是否使用批量 MCTS
             mcts_batch_size: 批量 MCTS 的 batch 大小
             fp16: MCTS 推理是否使用 FP16 混合精度
+            use_human_knowledge: 是否在搜索树中用人类知识增强 (默认关闭)
         """
         self.model = model
         self.device = device
@@ -83,7 +85,9 @@ class SelfPlayWorker:
                 c_puct=c_puct,
                 dirichlet_alpha=dirichlet_alpha,
                 batch_size=mcts_batch_size,
-                fp16=fp16
+                fp16=fp16,
+                win_condition=win_condition,
+                use_human_knowledge=use_human_knowledge
             )
         else:
             self.mcts = MCTS(
@@ -91,7 +95,9 @@ class SelfPlayWorker:
                 num_simulations=num_simulations,
                 c_puct=c_puct,
                 dirichlet_alpha=dirichlet_alpha,
-                fp16=fp16
+                fp16=fp16,
+                win_condition=win_condition,
+                use_human_knowledge=use_human_knowledge
             )
 
     def play_one_game(self, game_id: int = 0,
@@ -270,7 +276,8 @@ class SelfPlayManager:
                  opponent_pool=None,
                  mcts_batch_size: int = 16,
                  cpu_workers: int = 0,
-                 fp16: bool = False):
+                 fp16: bool = False,
+                 use_human_knowledge: bool = False):
         """
         Args:
             model: 当前训练的模型
@@ -283,6 +290,7 @@ class SelfPlayManager:
             mcts_batch_size: MCTS 批量推理大小
             cpu_workers: CPU 并行 worker 数 (0=串行GPU模式, >0=多进程CPU模式)
             fp16: MCTS 推理是否使用 FP16 混合精度
+            use_human_knowledge: 是否在搜索树中用人类知识增强 (默认关闭)
         """
         self.model = model
         self.device = device
@@ -294,13 +302,15 @@ class SelfPlayManager:
         self.fp16 = fp16
         self.opponent_pool = opponent_pool
         self.game_count = 0
+        self.use_human_knowledge = use_human_knowledge
         self._opponent_worker_cache = {}  # model_id → SelfPlayWorker 缓存
 
         self.worker = SelfPlayWorker(
             model, device, board_size, win_condition,
             num_simulations=num_simulations,
             mcts_batch_size=mcts_batch_size,
-            fp16=fp16
+            fp16=fp16,
+            use_human_knowledge=use_human_knowledge
         )
 
     def update_model(self, model: nn.Module):
@@ -313,7 +323,7 @@ class SelfPlayManager:
         生成 N 局自博弈数据
 
         当 cpu_workers > 0 时使用多进程并行 (CPU workers)
-        当 cpu_workers == 0 时使用串行 GPU 模式
+        否则使用串行 GPU 模式
         """
         if self.cpu_workers > 0 and self.model_class is not None:
             return self._generate_games_parallel(num_games)
@@ -398,6 +408,7 @@ class SelfPlayManager:
                 'game_id': game_id,
                 'num_games': 1,
                 'opponent_state_dict': opp_dict,
+                'use_human_knowledge': self.use_human_knowledge,
             })
 
         # 并行执行
@@ -483,7 +494,8 @@ class SelfPlayManager:
                 self.board_size, self.win_condition,
                 num_simulations=self.worker.mcts.num_simulations,
                 mcts_batch_size=self.worker.mcts.batch_size,
-                fp16=self.fp16
+                fp16=self.fp16,
+                use_human_knowledge=self.use_human_knowledge
             )
         opponent_worker = self._opponent_worker_cache[cache_key]
 
@@ -583,10 +595,13 @@ def _cpu_self_play_worker(config: dict) -> list:
     model.load_state_dict(config['model_state_dict'])
     model.eval()
 
+    use_human_knowledge = config.get('use_human_knowledge', False)
+
     worker = SelfPlayWorker(
         model, device, board_size, win_condition,
         num_simulations=num_simulations,
-        mcts_batch_size=mcts_batch_size
+        mcts_batch_size=mcts_batch_size,
+        use_human_knowledge=use_human_knowledge
     )
 
     all_data = []
@@ -606,7 +621,8 @@ def _cpu_self_play_worker(config: dict) -> list:
             opp_worker = SelfPlayWorker(
                 opp_model, device, board_size, win_condition,
                 num_simulations=num_simulations,
-                mcts_batch_size=mcts_batch_size
+                mcts_batch_size=mcts_batch_size,
+                use_human_knowledge=use_human_knowledge
             )
 
             # Run opponent game

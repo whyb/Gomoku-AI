@@ -13,7 +13,6 @@ PUCT(s,a) = Q(s,a) + c_puct × P(s,a) × √(N(s)) / (1 + N(s,a))
 import math
 import numpy as np
 import torch
-import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
 
 
@@ -59,56 +58,65 @@ def _find_immediate_win(board: np.ndarray, player: int) -> Optional[int]:
 def _find_opponent_threats(board: np.ndarray, player: int,
                            win_condition: int = 5) -> Dict[str, set]:
     """
-    查找对手（player 的对方）已有的活四、冲四威胁点。
-    返回: {'live4': set(actions), 'rush4': set(actions)}
+    滑动窗口检测对手所有威胁棋形。
+
+    用长度为 win_condition 的滑动窗沿 4 个方向扫描，自动覆盖：
+      - 连四:   X X X X _    (连续)
+      - 跳四:   X X _ X X    (一间隔)
+      - 跳四:   X _ X X X    (一间隔)
+      - 跳四:   _ X X X X    (一端空)
+      - 活三:   _ X X X _    (连续三, 两端空)
+      - 跳活三: _ X _ X X _  (三带一间隔)
+      - 跳活三: _ X X _ X _  (三带一间隔)
+      - 冲三:   O X X X _    (一端堵)
+      以及上述所有棋形在 win_condition≠5 时的等价形态。
+
+    返回: {
+        'must_block': 对手已有 win_condition-1 子，堵住空位即可阻止连珠,
+        'threats':    对手已有 win_condition-2 子，潜在威胁点,
+    }
     """
     h, w = board.shape
     opponent = 3 - player
-    live4 = set()
-    rush4 = set()
     directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
+
+    must_block = set()
+    threats = set()
 
     for x in range(h):
         for y in range(w):
-            if board[x, y] != opponent:
-                continue
             for dx, dy in directions:
-                # 找到该方向连续 opponent 子的起点
-                sx, sy = x, y
-                while (0 <= sx - dx < h and 0 <= sy - dy < w and
-                       board[sx - dx, sy - dy] == opponent):
-                    sx -= dx
-                    sy -= dy
-
-                # 统计连续 opponent 子数
-                count = 0
-                ex, ey = sx, sy
-                while 0 <= ex < h and 0 <= ey < w and board[ex, ey] == opponent:
-                    count += 1
-                    ex += dx
-                    ey += dy
-
-                if count != win_condition - 1:   # 只关心恰好 4 子
+                end_x = x + (win_condition - 1) * dx
+                end_y = y + (win_condition - 1) * dy
+                if not (0 <= end_x < h and 0 <= end_y < w):
                     continue
 
-                # 检查两端是否为空
-                left_x, left_y = sx - dx, sy - dy
-                right_x, right_y = ex, ey
+                opp_cnt = 0
+                own_cnt = 0
+                empties = []
+                for k in range(win_condition):
+                    cx, cy = x + k * dx, y + k * dy
+                    v = board[cx, cy]
+                    if v == opponent:
+                        opp_cnt += 1
+                    elif v == player:
+                        own_cnt += 1
+                    else:
+                        empties.append((cx, cy))
 
-                left_empty = (0 <= left_x < h and 0 <= left_y < w and
-                              board[left_x, left_y] == 0)
-                right_empty = (0 <= right_x < h and 0 <= right_y < w and
-                               board[right_x, right_y] == 0)
+                if own_cnt > 0:
+                    continue  # 我方棋子堵住了这条线
 
-                if left_empty and right_empty:
-                    live4.add(left_x * w + left_y)
-                    live4.add(right_x * w + right_y)
-                elif left_empty:
-                    rush4.add(left_x * w + left_y)
-                elif right_empty:
-                    rush4.add(right_x * w + right_y)
+                if opp_cnt == win_condition - 1:
+                    # 对手差 1 子连珠 → 必须堵
+                    for ex, ey in empties:
+                        must_block.add(ex * w + ey)
+                elif opp_cnt == win_condition - 2:
+                    # 对手差 2 子 → 潜在威胁 (活三/冲三等)
+                    for ex, ey in empties:
+                        threats.add(ex * w + ey)
 
-    return {'live4': live4, 'rush4': rush4}
+    return {'must_block': must_block, 'threats': threats}
 
 
 def get_forced_move(board: np.ndarray, player: int,
@@ -116,9 +124,8 @@ def get_forced_move(board: np.ndarray, player: int,
     """
     查找强制走法（规则短路），优先级：
       1. 自己能连五 → 直接获胜
-      2. 对手有活四 → 必须堵（若只有一个堵点）
-      3. 对手有冲四 → 必须堵
-      4. 对手有连五点 → 必须堵（兜底）
+      2. 对手有唯一必堵点 → 必须堵
+      3. 对手已有连五点（兜底检测）
     返回: (action, reason) 或 (None, None)
     """
     h, w = board.shape
@@ -128,9 +135,17 @@ def get_forced_move(board: np.ndarray, player: int,
     if win_action is not None:
         return win_action, 'win'
 
-    # 2. 对手已有连五点（理论上前一步就该发现，兜底）
+    # 2. 对手威胁检测 (滑动窗口, 覆盖连四/跳四等所有 4-in-W 形态)
+    threats = _find_opponent_threats(board, player, win_condition)
+    must_block = threats['must_block']
+
+    # 唯一必堵点 → 强制走法
+    if len(must_block) == 1:
+        return must_block.pop(), 'block'
+
+    # 3. 兜底: 对手已有连五点 (理论上前面已覆盖，此处保底)
     opponent = 3 - player
-    must_block = set()
+    opponent_win_points = set()
     for x in range(h):
         for y in range(w):
             if board[x, y] == 0:
@@ -138,21 +153,9 @@ def get_forced_move(board: np.ndarray, player: int,
                 win = _check_win_static(board, x, y, win_condition)
                 board[x, y] = 0
                 if win:
-                    must_block.add(x * w + y)
-    if len(must_block) == 1:
-        return must_block.pop(), 'block_win'
-
-    # 3. 对手活四 / 冲四
-    threats = _find_opponent_threats(board, player, win_condition)
-
-    live4_blocks = threats['live4']
-    if len(live4_blocks) == 1:
-        return live4_blocks.pop(), 'block_live4'
-    # 若对手有多个活四，已无法防守，交给 MCTS 决定
-
-    rush4_blocks = threats['rush4']
-    if len(rush4_blocks) >= 1:
-        return next(iter(rush4_blocks)), 'block_rush4'
+                    opponent_win_points.add(x * w + y)
+    if len(opponent_win_points) == 1:
+        return opponent_win_points.pop(), 'block_win'
 
     return None, None
 
@@ -239,20 +242,16 @@ class MCTSNode:
         self.current_player = current_player
         self.is_expanded = True
 
-        # 对非法动作 mask 后 softmax
-        masked_policy = policy.copy()
-        masked_policy[~valid_actions] = -float('inf')
-        policy_probs = F.softmax(
-            torch.tensor(masked_policy, dtype=torch.float32), dim=0
-        ).numpy()
+        # 纯 numpy softmax (避免 torch tensor 创建开销)
+        masked = np.where(valid_actions, policy, -1e9).astype(np.float64)
+        masked -= masked.max()
+        exp = np.exp(masked)
+        exp = np.where(valid_actions, exp, 0.0)
+        s = exp.sum()
+        probs = exp / s if s > 0 else valid_actions.astype(np.float64) / max(1, valid_actions.sum())
 
-        # 仅为合法动作创建子节点
-        for action in np.where(valid_actions)[0]:
-            self.children[action] = MCTSNode(
-                prior=policy_probs[action],
-                parent=self,
-                action=action
-            )
+        for a in np.flatnonzero(valid_actions):
+            self.children[int(a)] = MCTSNode(prior=float(probs[a]), parent=self, action=int(a))
 
     def backup(self, value: float):
         """
@@ -285,7 +284,8 @@ class MCTS:
                  c_puct: float = 1.5, dirichlet_alpha: float = 0.3,
                  dirichlet_epsilon: float = 0.25, fp16: bool = False,
                  use_candidate_mask: bool = True, candidate_radius: int = 2,
-                 early_stop_threshold: float = 0.95, early_stop_min_sims: int = 50):
+                 early_stop_threshold: float = 0.95, early_stop_min_sims: int = 50,
+                 win_condition: int = 5, use_human_knowledge: bool = False):
         """
         Args:
             model: 神经网络模型 (输出 policy logits, value)
@@ -299,6 +299,7 @@ class MCTS:
             candidate_radius: 候选点半径 (默认 2 格)
             early_stop_threshold: 最佳动作访问占比超过此值时提前终止
             early_stop_min_sims: 最早在第几次模拟后启用提前终止
+            use_human_knowledge: 是否在搜索树中用人类知识增强 (默认关闭, 保持搜索纯净)
         """
         self.model = model
         self.device = device
@@ -311,6 +312,8 @@ class MCTS:
         self.candidate_radius = candidate_radius
         self.early_stop_threshold = early_stop_threshold
         self.early_stop_min_sims = early_stop_min_sims
+        self.win_condition = win_condition
+        self.use_human_knowledge = use_human_knowledge
         # autocast device_type: 兼容 'cuda' 和 ROCm 的 'cuda' 设备标识
         self._amp_device = 'cuda' if ('cuda' in device or device != 'cpu') else 'cpu'
 
@@ -423,24 +426,28 @@ class MCTS:
         if valid_count == 0:
             return [], np.array([])
 
-        # 评估根节点
-        policy, value = self._evaluate(state)
+        # 评估根节点 → logits
+        policy, _ = self._evaluate(state)
 
-        # 根节点添加 Dirichlet 噪声 (AlphaZero 核心技巧)
-        if add_noise:
-            if valid_count > 0:
-                noise = np.random.dirichlet(
-                    [self.dirichlet_alpha] * valid_count
-                )
-                noise_idx = 0
-                for i in np.where(valid_actions)[0]:
-                    policy[i] = (1 - self.dirichlet_epsilon) * policy[i] + \
-                                self.dirichlet_epsilon * noise[noise_idx]
-                    noise_idx += 1
+        # softmax → 概率, 再混合 Dirichlet 噪声 (AlphaZero 标准做法: 在概率空间混合)
+        masked = np.where(valid_actions, policy, -1e9).astype(np.float64)
+        masked -= masked.max()
+        exp = np.exp(masked)
+        exp = np.where(valid_actions, exp, 0.0)
+        probs = exp / exp.sum()
+
+        if add_noise and valid_count > 0:
+            noise = np.random.dirichlet([self.dirichlet_alpha] * valid_count)
+            j = 0
+            for i in np.flatnonzero(valid_actions):
+                probs[i] = (1 - self.dirichlet_epsilon) * probs[i] + self.dirichlet_epsilon * noise[j]
+                j += 1
+            probs /= probs.sum()
 
         # 从棋盘推导当前玩家: P1 先手, 棋子数相等→P1, 否则 P2
         current_player = 1 if (board == 1).sum() == (board == 2).sum() else 2
-        root.expand(policy, valid_actions, current_player=current_player)
+        # 传入 log(probs), expand 内部会 softmax 还原为概率
+        root.expand(np.log(probs + 1e-10), valid_actions, current_player=current_player)
 
         # 主搜索循环
         for sim in range(self.num_simulations):
@@ -456,31 +463,38 @@ class MCTS:
                 )
                 search_path.append(node)
 
-            # 获取叶节点的父节点 (用于确定当前玩家)
+            # 获取叶节点的父节点
             parent = search_path[-2] if len(search_path) >= 2 else root
             last_action = node.action
 
             # 2. 检查是否终局
             if last_action >= 0:
-                # 落子的是 parent 的 current_player
-                x, y = last_action // sim_board.shape[1], last_action % sim_board.shape[1]
                 is_terminal, terminal_value = self._is_terminal(sim_board, last_action)
             else:
                 is_terminal = False
                 terminal_value = 0.0
 
             if is_terminal:
-                # 终局: 价值从落子方视角
-                value = terminal_value
-                # 但 backup 时要从 node.parent.current_player 的对手视角
-                # 因为 node 是 "对手下一步" 的节点
-                value_for_backup = -terminal_value  # 对手赢了 = 当前玩家输了
+                value_for_backup = -terminal_value
             else:
-                # 3. EXPAND & EVALUATE: 用 NN 评估
-                # 构建当前节点的状态表示
-                current_player = 3 - parent.current_player  # 轮到对手了
+                # 3. EXPAND & EVALUATE: NN 推理 + 扩展
+                current_player = 3 - parent.current_player
                 sim_state = self._build_state(sim_board, current_player)
                 policy, value = self._evaluate(sim_state)
+
+                # 可选: 人类知识增强 (--mcts_human_knowledge, 默认关闭)
+                if self.use_human_knowledge:
+                    win_action = _find_immediate_win(sim_board, current_player)
+                    if win_action is not None:
+                        policy[win_action] = policy.max() + 10.0
+                    threat_info = _find_opponent_threats(sim_board, current_player,
+                                                         self.win_condition)
+                    for action in threat_info['must_block']:
+                        policy[action] = policy.max() + 10.0
+                    for action in threat_info['threats']:
+                        if policy[action] < policy.max() + 1.0:
+                            policy[action] = max(policy[action], policy.max() + 1.0)
+
                 valid = self._get_valid_actions(sim_board)
                 if valid.any():
                     node.expand(policy, valid, current_player)
@@ -550,7 +564,8 @@ class BatchMCTS:
                  dirichlet_epsilon: float = 0.25,
                  batch_size: int = 16, fp16: bool = False,
                  use_candidate_mask: bool = True, candidate_radius: int = 2,
-                 early_stop_threshold: float = 0.95, early_stop_min_sims: int = 50):
+                 early_stop_threshold: float = 0.95, early_stop_min_sims: int = 50,
+                 win_condition: int = 5, use_human_knowledge: bool = False):
         self.model = model
         self.device = device
         self.num_simulations = num_simulations
@@ -563,6 +578,8 @@ class BatchMCTS:
         self.candidate_radius = candidate_radius
         self.early_stop_threshold = early_stop_threshold
         self.early_stop_min_sims = early_stop_min_sims
+        self.win_condition = win_condition
+        self.use_human_knowledge = use_human_knowledge
         self._amp_device = 'cuda' if ('cuda' in device or device != 'cpu') else 'cpu'
 
     @torch.no_grad()
@@ -576,17 +593,22 @@ class BatchMCTS:
         values = values.float().cpu().numpy()
         return policies, values
 
+    def _get_valid_actions(self, board: np.ndarray) -> np.ndarray:
+        """获取合法动作 (棋盘上为空的位置，且在有棋子周围 radius 格内)"""
+        valid = (board.reshape(-1) == 0)
+        if self.use_candidate_mask:
+            candidate = get_candidate_mask(board, self.candidate_radius)
+            valid = valid & candidate
+            if not valid.any():
+                valid = (board.reshape(-1) == 0)
+        return valid
+
     def search(self, state: np.ndarray, board: np.ndarray,
                temperature: float = 1.0,
                add_noise: bool = True) -> Tuple[List[int], np.ndarray]:
         """批量 MCTS 搜索 (接口与 MCTS.search 一致)"""
         root = MCTSNode(prior=0)
-        valid_actions = (board.reshape(-1) == 0)
-        if self.use_candidate_mask:
-            candidate = get_candidate_mask(board, self.candidate_radius)
-            valid_actions = valid_actions & candidate
-            if not valid_actions.any():
-                valid_actions = (board.reshape(-1) == 0)
+        valid_actions = self._get_valid_actions(board)
         h, w = board.shape
         valid_count = int(valid_actions.sum())
 
@@ -597,24 +619,29 @@ class BatchMCTS:
         if valid_count == 0:
             return [], np.array([])
 
-        # 评估根节点
-        policy, value = self._evaluate_batch([state])
+        # 评估根节点 → logits
+        policy, _ = self._evaluate_batch([state])
         policy = policy[0]
-        value = value[0]
 
-        # Dirichlet 噪声
-        if add_noise:
-            if valid_count > 0:
-                noise = np.random.dirichlet([self.dirichlet_alpha] * valid_count)
-                noise_idx = 0
-                for i in np.where(valid_actions)[0]:
-                    policy[i] = (1 - self.dirichlet_epsilon) * policy[i] + \
-                                self.dirichlet_epsilon * noise[noise_idx]
-                    noise_idx += 1
+        # softmax → 概率, 再混合 Dirichlet 噪声 (AlphaZero 标准做法: 在概率空间混合)
+        masked = np.where(valid_actions, policy, -1e9).astype(np.float64)
+        masked -= masked.max()
+        exp = np.exp(masked)
+        exp = np.where(valid_actions, exp, 0.0)
+        probs = exp / exp.sum()
+
+        if add_noise and valid_count > 0:
+            noise = np.random.dirichlet([self.dirichlet_alpha] * valid_count)
+            j = 0
+            for i in np.flatnonzero(valid_actions):
+                probs[i] = (1 - self.dirichlet_epsilon) * probs[i] + self.dirichlet_epsilon * noise[j]
+                j += 1
+            probs /= probs.sum()
 
         # 从棋盘推导当前玩家: P1 先手, 棋子数相等→P1, 否则 P2
         current_player = 1 if (board == 1).sum() == (board == 2).sum() else 2
-        root.expand(policy, valid_actions, current_player=current_player)
+        # 传入 log(probs), expand 内部会 softmax 还原为概率
+        root.expand(np.log(probs + 1e-10), valid_actions, current_player=current_player)
 
         sim_count = 0
         while sim_count < self.num_simulations:
@@ -622,6 +649,8 @@ class BatchMCTS:
             batch_leaves = []
             batch_states = []
             batch_boards = []
+
+            visited_in_batch = set()  # 防止同一 batch 内重复选中未展开节点
 
             for _ in range(self.batch_size):
                 if sim_count >= self.num_simulations:
@@ -640,13 +669,18 @@ class BatchMCTS:
                     sim_board[x, y] = node.parent.current_player
                     search_path.append(node)
 
+                # 去重: 同一 batch 内叶节点尚未 expand, PUCT 不变, 会被重复选中
+                if id(node) in visited_in_batch:
+                    continue
+                visited_in_batch.add(id(node))
+
                 parent = search_path[-2] if len(search_path) >= 2 else root
                 last_action = node.action
 
                 # 检查终局
                 if last_action >= 0:
                     is_terminal, terminal_value = self._check_terminal_static(
-                        sim_board, last_action
+                        sim_board, last_action, self.win_condition
                     )
                 else:
                     is_terminal, terminal_value = False, 0.0
@@ -669,13 +703,20 @@ class BatchMCTS:
 
                 for (node, search_path, sim_board, cp), policy, value in \
                         zip(batch_leaves, policies, values):
-                    valid = self._get_valid_actions(sim_board) if hasattr(self, '_get_valid_actions') else (sim_board.reshape(-1) == 0)
-                    # BatchMCTS 也应用候选过滤
-                    if self.use_candidate_mask:
-                        candidate = get_candidate_mask(sim_board, self.candidate_radius)
-                        valid = valid & candidate
-                        if not valid.any():
-                            valid = (sim_board.reshape(-1) == 0)
+                    # 可选: 人类知识增强 (--mcts_human_knowledge, 默认关闭)
+                    if self.use_human_knowledge:
+                        win_action = _find_immediate_win(sim_board, cp)
+                        if win_action is not None:
+                            policy[win_action] = policy.max() + 10.0
+                        threat_info = _find_opponent_threats(sim_board, cp,
+                                                             self.win_condition)
+                        for action in threat_info['must_block']:
+                            policy[action] = policy.max() + 10.0
+                        for action in threat_info['threats']:
+                            if policy[action] < policy.max() + 1.0:
+                                policy[action] = max(policy[action], policy.max() + 1.0)
+
+                    valid = self._get_valid_actions(sim_board)
                     if valid.any():
                         node.expand(policy, valid, cp)
                     node.backup(value)
@@ -714,7 +755,7 @@ class BatchMCTS:
         return new_board
 
     @staticmethod
-    def _check_terminal_static(board, last_action):
+    def _check_terminal_static(board, last_action, win_condition=5):
         h, w = board.shape
         x, y = last_action // w, last_action % w
         player = board[x, y]
@@ -727,7 +768,7 @@ class BatchMCTS:
                     count += 1
                     nx += sign * dx
                     ny += sign * dy
-            if count >= 5:
+            if count >= win_condition:
                 return True, 1.0
         if not (board == 0).any():
             return True, 0.0
