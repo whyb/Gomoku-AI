@@ -209,6 +209,116 @@ class GomokuNetAlphaZeroSmall(nn.Module):
         return policy, value
 
 
+# ================================================================
+# 知识蒸馏工具
+# ================================================================
+
+class DistillationConfig:
+    """知识蒸馏超参数配置
+
+    各参数的设计理由见 train_alphazero.py 中的 --distill_* 帮助文档。
+    """
+
+    def __init__(self,
+                 temperature: float = 3.0,
+                 value_weight: float = 0.5,
+                 lr: float = 3e-3,
+                 lr_min: float = 1e-5,
+                 warmup_steps: int = 500,
+                 decay_steps: int = 50000,
+                 batch_size: int = 2048,
+                 distill_games: int = 50000,
+                 random_open_frac: float = 0.2,
+                 l2_coeff: float = 1e-4):
+        self.temperature = temperature
+        self.value_weight = value_weight
+        self.lr = lr
+        self.lr_min = lr_min
+        self.warmup_steps = warmup_steps
+        self.decay_steps = decay_steps
+        self.batch_size = batch_size
+        self.distill_games = distill_games
+        self.random_open_frac = random_open_frac
+        self.l2_coeff = l2_coeff
+
+
+def distillation_loss(student_logits: torch.Tensor,
+                      student_value: torch.Tensor,
+                      teacher_policy: torch.Tensor,
+                      game_outcome: torch.Tensor,
+                      temperature: float = 3.0,
+                      value_weight: float = 0.5,
+                      l2_coeff: float = 1e-4,
+                      model_params: list = None
+                      ) -> tuple:
+    """
+    知识蒸馏损失函数 (Hinton 2015 风格)
+
+    总损失:
+      L = L_policy + λ_value × L_value + λ_l2 × ||θ||²
+
+    其中:
+      L_policy = KL( softmax(s_teacher / T) || softmax(s_student / T) ) × T²
+                 → 让学生在温度 T 下模仿教师的软标签
+      L_value  = MSE(v_student, z_game)   (z ∈ {-1, 0, +1})
+
+    温度 T² 缩放: logits / T 后梯度缩小 1/T², 乘以 T² 恢复原始量级,
+    使策略损失与价值损失的尺度匹配。
+
+    Args:
+        student_logits:  (B, H×W) 学生网络策略 logits
+        student_value:   (B,) 或 (B,1) 学生网络价值预测
+        teacher_policy:  (B, H×W) 教师策略分布 (概率, 已归一化)
+        game_outcome:    (B,) 终局结果 (+1/-1/0)
+        temperature:     蒸馏温度 T
+        value_weight:    价值损失权重 λ_value
+        l2_coeff:        L2 正则系数 λ_l2
+        model_params:    模型参数列表 (用于 L2 正则, 可选)
+
+    Returns:
+        (total_loss, policy_loss, value_loss)
+    """
+    # --- 策略损失: KL 散度 (教师→学生) ---
+    # 教师软目标: softmax(log_teacher / T) — teacher_policy 已经是概率,
+    # 但为了一致性我们将其视为"logits 经 T 软化后的结果"
+    # 实际上 teacher_policy 是教师原始评分经 log→温度→softmax 得到的概率,
+    # 这里直接用 KL 散度度量学生输出与教师策略的差异。
+
+    # 学生 log prob (带温度)
+    student_log_probs = torch.nn.functional.log_softmax(
+        student_logits / temperature, dim=1
+    )
+
+    # 教师 soft prob (带温度, 从原始概率再软化一次)
+    # teacher_policy 已经是概率分布, 再软化: p_i^(1/T) / Σ_j p_j^(1/T)
+    teacher_soft = torch.pow(teacher_policy + 1e-10, 1.0 / temperature)
+    teacher_soft = teacher_soft / teacher_soft.sum(dim=1, keepdim=True)
+
+    # KL 散度 (teacher_soft 作为 target, student 去匹配)
+    policy_loss = torch.sum(
+        teacher_soft * (torch.log(teacher_soft + 1e-10) - student_log_probs),
+        dim=1
+    ).mean()
+
+    # 温度平方缩放 (恢复梯度量级)
+    policy_loss = policy_loss * (temperature ** 2)
+
+    # --- 价值损失: MSE ---
+    if student_value.dim() > 1:
+        student_value = student_value.squeeze(-1)
+    value_loss = torch.nn.functional.mse_loss(student_value, game_outcome)
+
+    # --- 总损失 ---
+    total_loss = policy_loss + value_weight * value_loss
+
+    # --- L2 正则 ---
+    if l2_coeff > 0 and model_params is not None:
+        l2_reg = sum(p.pow(2).sum() for p in model_params)
+        total_loss = total_loss + l2_coeff * l2_reg
+
+    return total_loss, policy_loss, value_loss
+
+
 if __name__ == '__main__':
     # 测试模型
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -228,3 +338,19 @@ if __name__ == '__main__':
     params = sum(p.numel() for p in model_small.parameters())
     print(f"\nSmall model: policy={policy.shape}, value={value.shape}, "
           f"params={params:,}")
+
+    # 测试蒸馏损失
+    print("\n--- 蒸馏损失测试 ---")
+    B, H, W = 4, 10, 10
+    test_logits = torch.randn(B, H * W)
+    test_value = torch.randn(B)
+    test_teacher = torch.softmax(torch.randn(B, H * W), dim=1)
+    test_outcome = torch.zeros(B)
+    test_outcome[0] = 1.0
+    test_outcome[1] = -1.0
+
+    total, p_loss, v_loss = distillation_loss(
+        test_logits, test_value, test_teacher, test_outcome,
+        temperature=3.0, value_weight=0.5
+    )
+    print(f"Total={total:.4f}, Policy={p_loss:.4f}, Value={v_loss:.4f}")

@@ -50,7 +50,8 @@ warnings.filterwarnings(
 )
 
 from config import Config, update_config_from_cli
-from model_alphazero import GomokuNetAlphaZero, GomokuNetAlphaZeroSmall
+from model_alphazero import (GomokuNetAlphaZero, GomokuNetAlphaZeroSmall,
+                              DistillationConfig, distillation_loss)
 from model_dy import load_model_if_exists
 from mcts import MCTS, BatchMCTS, get_forced_move
 from self_play import SelfPlayWorker, SelfPlayManager
@@ -59,6 +60,7 @@ from opponent_pool import OpponentPool
 from elo import EloRating
 from arena import Arena
 from opening_book import OpeningBook
+from teacher import TeacherAI, generate_distill_games
 
 # ============================================================
 # 常量 (基准测试最优值: AMD RX 7900 XTX / RTX 3060 Ti)
@@ -125,6 +127,38 @@ class ReplayBuffer:
     def __len__(self):
         return self._size
 
+    def save(self, filepath: str):
+        """保存 ReplayBuffer 到磁盘 (压缩 numpy 格式)"""
+        np.savez_compressed(
+            filepath,
+            states=self._states[:self._size],
+            policies=self._policies[:self._size],
+            values=self._values[:self._size],
+            head=self._head,
+            size=self._size,
+            capacity=self.capacity,
+            board_size=self.board_size
+        )
+
+    def load(self, filepath: str):
+        """从磁盘加载 ReplayBuffer"""
+        data = np.load(filepath, allow_pickle=False)
+        loaded_size = int(data['size'])
+        loaded_capacity = int(data['capacity'])
+        if loaded_capacity != self.capacity:
+            self.capacity = loaded_capacity
+            self._states = np.empty((loaded_capacity, 2, self.board_size, self.board_size), dtype=np.float32)
+            self._policies = np.empty((loaded_capacity, self.board_size * self.board_size), dtype=np.float32)
+            self._values = np.empty(loaded_capacity, dtype=np.float32)
+        n = min(loaded_size, self.capacity)
+        self._states[:n] = data['states'][:n]
+        self._policies[:n] = data['policies'][:n]
+        self._values[:n] = data['values'][:n]
+        self._head = int(data['head']) % self.capacity
+        self._size = n
+        print(f"  加载 ReplayBuffer: {self._size:,} 样本 (capacity={self.capacity:,})")
+        return self._size
+
 
 def update_model_alphazero(model: nn.Module, optimizer: torch.optim.Optimizer,
                            scaler: GradScaler, batch: Tuple,
@@ -174,8 +208,561 @@ def update_model_alphazero(model: nn.Module, optimizer: torch.optim.Optimizer,
     return loss.item(), policy_loss.item(), value_loss.item()
 
 
+# ============================================================
+# 知识蒸馏训练 (教师引导 → 快速达到大师水平)
+# ============================================================
+
+# 蒸馏专用常量
+DISTILL_GAMES_PER_BATCH = 500    # 每批生成的游戏数 (增量, Ctrl+C 安全)
+DISTILL_SAVE_STEPS = 2000        # 每 N 训练步保存一次
+DISTILL_EVAL_STEPS = 500         # 每 N 训练步评估 Top-K
+DISTILL_LOG_STEPS = 100          # 每 N 训练步打印日志
+
+
+def _update_model_distill(model, optimizer, scaler, batch, device,
+                          distill_cfg, fp16=False):
+    """
+    蒸馏模式下的单步训练 — 使用 KL 散度匹配教师策略
+
+    与 update_model_alphazero 的区别:
+      - 策略损失: KL(teacher_policy || student_policy) 而非 CE(π_mcts, p_net)
+      - 价值损失: 相同 (MSE with game outcome)
+      - 温度参数控制软标签平滑度
+    """
+    states, teacher_policies, values = batch
+    states = states.to(device)
+    teacher_policies = teacher_policies.to(device)
+    values = values.to(device)
+
+    optimizer.zero_grad()
+
+    amp_dtype = torch.float16 if fp16 else None
+    with autocast('cuda' if 'cuda' in device else 'cpu', dtype=amp_dtype):
+        logits, v_pred = model(states)
+
+        loss, p_loss, v_loss = distillation_loss(
+            logits, v_pred, teacher_policies, values,
+            temperature=distill_cfg.temperature,
+            value_weight=distill_cfg.value_weight,
+            l2_coeff=distill_cfg.l2_coeff,
+            model_params=model.parameters()
+        )
+
+    scaler.scale(loss).backward()
+    scaler.unscale_(optimizer)
+    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+    scaler.step(optimizer)
+    scaler.update()
+
+    return loss.item(), p_loss.item(), v_loss.item()
+
+
+def _compute_topk_accuracy(model, batch, device, k_values=(1, 3, 5)):
+    """计算学生网络与教师策略的 Top-K 一致率"""
+    states, teacher_policies, _ = batch
+    states = states.to(device)
+    teacher_policies = teacher_policies.to(device)
+
+    with torch.no_grad():
+        logits, _ = model(states)
+        _, student_topk = torch.topk(logits, max(k_values), dim=1)
+
+    _, teacher_top1 = torch.topk(teacher_policies, 1, dim=1)
+    teacher_top1 = teacher_top1.expand(-1, max(k_values))
+
+    results = {}
+    for k in k_values:
+        match = (student_topk[:, :k] == teacher_top1[:, :k]).any(dim=1)
+        results[f'top{k}'] = match.float().mean().item()
+    return results
+
+
+def _save_distill_checkpoint(model, optimizer, scheduler, scaler,
+                              replay_buffer, buffer_path,
+                              update_step, games_generated,
+                              board_size, win_condition, model_tag,
+                              distill_cfg, checkpoint_path,
+                              distill_model_path):
+    """保存蒸馏完整状态 (训练状态 + 数据)"""
+    # 训练 checkpoint
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'scheduler_state_dict': scheduler.state_dict(),
+        'scaler_state_dict': scaler.state_dict(),
+        'update_step': update_step,
+        'games_generated': games_generated,
+        'board_size': board_size,
+        'win_condition': win_condition,
+        'model_tag': model_tag,
+        'distill_temperature': distill_cfg.temperature,
+        'distill_value_weight': distill_cfg.value_weight,
+        'distill_lr': distill_cfg.lr,
+        'distill_games': distill_cfg.distill_games,
+        'save_time': time.time(),
+    }, checkpoint_path)
+    # 纯权重 (供 MCTS 微调加载)
+    torch.save(model.state_dict(), distill_model_path)
+    # Replay Buffer 数据
+    replay_buffer.save(buffer_path)
+
+
+def _load_distill_checkpoint(model, optimizer, scheduler, scaler,
+                              replay_buffer, checkpoint_path, buffer_path,
+                              device):
+    """加载蒸馏 checkpoint + replay buffer, 返回 (update_step, games_generated)"""
+    update_step = 0
+    games_generated = 0
+    ckpt = None
+
+    if os.path.exists(checkpoint_path):
+        print(f"发现蒸馏 checkpoint: {checkpoint_path}")
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt['model_state_dict'])
+        update_step = ckpt.get('update_step', 0)
+        games_generated = ckpt.get('games_generated', 0)
+        print(f"  从 step={update_step}, games={games_generated} 恢复")
+    else:
+        print("从零开始蒸馏训练")
+        return update_step, games_generated
+
+    if ckpt is not None:
+        if 'optimizer_state_dict' in ckpt:
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        if 'scheduler_state_dict' in ckpt:
+            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+        if 'scaler_state_dict' in ckpt:
+            scaler.load_state_dict(ckpt['scaler_state_dict'])
+
+    # 加载 replay buffer
+    if os.path.exists(buffer_path):
+        replay_buffer.load(buffer_path)
+
+    return update_step, games_generated
+
+
+def train_distill(args):
+    """
+    知识蒸馏训练主循环 (增量生成 + 可续训 + Ctrl+C 安全)
+
+    两阶段流程:
+      Phase 1 (本函数): 教师引导 → 学生快速模仿大师
+      Phase 2 (train 函数): 关闭 --distill → 自动加载蒸馏权重 → MCTS 微调
+
+    关键设计:
+      - 分批生成游戏 (每批 500 局), 生成一批 → 加入 buffer → 训练几步 → 循环
+      - 每批生成后保存 checkpoint (含 replay buffer), Ctrl+C 随时安全退出
+      - 支持 --save_interval_hours 定时自动保存
+      - 续训时自动跳过已生成的游戏
+    """
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    board_size = args.board_size
+    win_condition = args.win_condition
+
+    # --- 蒸馏超参数 ---
+    distill_cfg = DistillationConfig(
+        temperature=args.distill_temperature,
+        value_weight=args.distill_value_weight,
+        lr=args.distill_lr,
+        lr_min=args.distill_lr_min,
+        warmup_steps=args.distill_warmup_steps,
+        decay_steps=args.distill_decay_steps,
+        batch_size=args.distill_batch_size,
+        distill_games=args.distill_games,
+        random_open_frac=args.distill_random_frac,
+        l2_coeff=L2_COEFF,
+    )
+
+    # --- 模型 ---
+    if args.model == 'small':
+        model = GomokuNetAlphaZeroSmall().to(device)
+        model_tag = 'small'
+    else:
+        model = GomokuNetAlphaZero().to(device)
+        model_tag = 'standard'
+
+    prefix = f'alpaz_{model_tag}_{board_size}x{board_size}'
+    distill_model_path = f'{prefix}_distill.pth'
+    checkpoint_path = f'{prefix}_distill_checkpoint.pth'
+    buffer_path = f'{prefix}_distill_buffer.npz'
+
+    # --- 优化器 + AMP + LR ---
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=distill_cfg.lr,
+        weight_decay=distill_cfg.l2_coeff
+    )
+    scaler = GradScaler('cuda')
+
+    def lr_lambda_distill(step):
+        cycle_length = max(1, distill_cfg.decay_steps)
+        step_in_cycle = step % cycle_length
+        if step_in_cycle < distill_cfg.warmup_steps:
+            return step_in_cycle / max(1, distill_cfg.warmup_steps)
+        progress = min(1.0, (step_in_cycle - distill_cfg.warmup_steps) /
+                       max(1, cycle_length - distill_cfg.warmup_steps))
+        cos_val = 0.5 * (1 + np.cos(np.pi * progress))
+        final_factor = distill_cfg.lr_min / distill_cfg.lr
+        return final_factor + (1.0 - final_factor) * cos_val
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda_distill)
+
+    # --- Replay Buffer (环形缓冲, 固定容量, 与游戏数量无关) ---
+    replay_buffer = ReplayBuffer(capacity=REPLAY_BUFFER_SIZE, board_size=board_size)
+
+    # --- 恢复训练状态 ---
+    update_step, games_generated = _load_distill_checkpoint(
+        model, optimizer, scheduler, scaler, replay_buffer,
+        checkpoint_path, buffer_path, device
+    )
+
+    # --- 打印配置 ---
+    print("=" * 60)
+    print("知识蒸馏训练 — 教师引导模式")
+    print("=" * 60)
+    print(f"棋盘大小:      {board_size}×{board_size}")
+    print(f"连子数:        {win_condition}")
+    print(f"模型:          {model_tag} ({sum(p.numel() for p in model.parameters()):,} 参数)")
+    print(f"教师 AI:       Kali-Hac (Mode='比你6的Level')")
+    print(f"蒸馏温度 T:    {distill_cfg.temperature}")
+    print(f"价值损失权重:  {distill_cfg.value_weight}")
+    print(f"学习率:        {distill_cfg.lr}")
+    print(f"Batch size:    {distill_cfg.batch_size}")
+    print(f"目标对局数:    {distill_cfg.distill_games:,}")
+    print(f"已生成对局:    {games_generated:,}")
+    print(f"随机开局比例:  {distill_cfg.random_open_frac:.0%}")
+    print(f"保存间隔:      {args.save_interval_hours} 小时")
+    print(f"对称增强:      开启 (8×)")
+    print(f"设备:          {device}")
+    if device == 'cuda':
+        print(f"GPU:           {torch.cuda.get_device_name(0)}")
+    if games_generated > 0:
+        print(f">>> 续训模式: 从 game {games_generated} 继续生成")
+        print(f">>> Buffer 已有: {len(replay_buffer):,} 样本")
+    print("=" * 60)
+
+    # --- 初始化教师 ---
+    print("\n初始化教师 AI...")
+    teacher = TeacherAI(board_size=board_size)
+    print("教师就绪。")
+
+    # ============================================================
+    # 训练循环: 生成数据 → 训练 → 保存 (交替进行)
+    # ============================================================
+    batch_size = distill_cfg.batch_size
+    total_games_target = distill_cfg.distill_games
+    games_per_batch = min(DISTILL_GAMES_PER_BATCH, total_games_target)
+    max_steps = distill_cfg.decay_steps
+    save_interval_sec = args.save_interval_hours * 3600
+
+    start_time = time.time()
+    last_save_time = time.time()
+    running = True
+
+    def signal_handler(sig, frame):
+        nonlocal running
+        print("\n\n收到中断信号 (Ctrl+C)，正在安全保存...")
+        running = False
+    signal.signal(signal.SIGINT, signal_handler)
+
+    # 滑动窗口统计 (格式对齐正常训练的日志)
+    recent_losses = deque(maxlen=100)
+    recent_p_losses = deque(maxlen=100)
+    recent_v_losses = deque(maxlen=100)
+    recent_gen_times = deque(maxlen=20)       # 每批生成耗时
+    recent_train_times = deque(maxlen=20)     # 每批训练耗时
+    recent_game_lengths = deque(maxlen=100)   # 每局平均步数
+    recent_gen_moves = deque(maxlen=20)       # 每批生成的样本数
+    total_samples_generated = 0               # 累计样本数
+
+    print(f"\n开始蒸馏训练... (Ctrl+C 安全退出并保存)")
+    print("-" * 100)
+
+    try:
+        while running:
+            # ====================================================
+            # Phase A: 增量生成教师数据
+            # ====================================================
+            if games_generated < total_games_target:
+                remaining = total_games_target - games_generated
+                batch_games = min(games_per_batch, remaining)
+
+                t_gen_start = time.time()
+                try:
+                    game_data = generate_distill_games(
+                        teacher, board_size=board_size, win_condition=win_condition,
+                        num_games=batch_games,
+                        policy_temperature=distill_cfg.temperature,
+                        random_open_frac=distill_cfg.random_open_frac,
+                        verbose=False  # 内部 verbose 关闭, 统一由外部汇总
+                    )
+                except KeyboardInterrupt:
+                    print("\n生成中断, 保存已完成的游戏...")
+                    running = False
+                    break
+
+                gen_time = time.time() - t_gen_start
+                games_generated += batch_games
+                num_samples_this_batch = len(game_data)
+                total_samples_generated += num_samples_this_batch
+                avg_game_len = num_samples_this_batch / max(1, batch_games)
+
+                replay_buffer.add(game_data)
+                del game_data
+
+                recent_gen_times.append(gen_time)
+                recent_game_lengths.append(avg_game_len)
+                recent_gen_moves.append(num_samples_this_batch)
+
+                # 数据生成全部完成: 立即保存
+                if games_generated >= total_games_target:
+                    print(f"\n[数据] 全部 {total_games_target:,} 局生成完成!"
+                          f" 共 {total_samples_generated:,} 样本, "
+                          f"耗时 {time.time() - start_time:.0f}s")
+                    _save_distill_checkpoint(
+                        model, optimizer, scheduler, scaler,
+                        replay_buffer, buffer_path,
+                        update_step, games_generated,
+                        board_size, win_condition, model_tag,
+                        distill_cfg, checkpoint_path, distill_model_path
+                    )
+                    last_save_time = time.time()
+
+            # ====================================================
+            # Phase B: 训练 (如果有足够数据)
+            # ====================================================
+            if len(replay_buffer) < batch_size:
+                if games_generated >= total_games_target:
+                    break
+                continue
+
+            t_train_start = time.time()
+            trained_this_batch = 0
+            train_steps_per_batch = 200
+
+            while trained_this_batch < train_steps_per_batch and running:
+                model.train()
+                batch = replay_buffer.sample(batch_size, board_size, augment=True)
+
+                loss, p_loss, v_loss = _update_model_distill(
+                    model, optimizer, scaler, batch, device,
+                    distill_cfg, fp16=args.fp16
+                )
+                scheduler.step()
+                update_step += 1
+                trained_this_batch += 1
+
+                recent_losses.append(loss)
+                recent_p_losses.append(p_loss)
+                recent_v_losses.append(v_loss)
+
+                # --- 步数触发保存 ---
+                if update_step % DISTILL_SAVE_STEPS == 0:
+                    t_save = time.time()
+                    _save_distill_checkpoint(
+                        model, optimizer, scheduler, scaler,
+                        replay_buffer, buffer_path,
+                        update_step, games_generated,
+                        board_size, win_condition, model_tag,
+                        distill_cfg, checkpoint_path, distill_model_path
+                    )
+                    last_save_time = time.time()
+                    print(f"  [保存] Checkpoint @ step={update_step}, "
+                          f"games={games_generated} "
+                          f"({time.time() - t_save:.1f}s)")
+
+                # --- 时间触发保存 ---
+                if save_interval_sec > 0:
+                    if time.time() - last_save_time >= save_interval_sec:
+                        t_save = time.time()
+                        _save_distill_checkpoint(
+                            model, optimizer, scheduler, scaler,
+                            replay_buffer, buffer_path,
+                            update_step, games_generated,
+                            board_size, win_condition, model_tag,
+                            distill_cfg, checkpoint_path, distill_model_path
+                        )
+                        last_save_time = time.time()
+                        print(f"  [自动保存] 定时触发 @ {time.time() - start_time:.0f}s "
+                              f"(间隔 {save_interval_sec/3600:.1f}h) "
+                              f"({time.time() - t_save:.1f}s)")
+
+            train_time = time.time() - t_train_start
+            recent_train_times.append(train_time)
+
+            # ====================================================
+            # 汇总日志 (每 500 局生成后打印, 格式对齐正常训练)
+            # ====================================================
+            # 每 500 局汇总打印
+            if games_generated > 0 and games_generated % games_per_batch == 0:
+                # --- 评估 Top-K ---
+                model.eval()
+                eval_batch = replay_buffer.sample(
+                    min(batch_size, len(replay_buffer)),
+                    board_size, augment=False
+                )
+                acc = _compute_topk_accuracy(model, eval_batch, device)
+
+                # --- 计算滑动平均 ---
+                avg_loss = (sum(recent_losses) / len(recent_losses)
+                            if recent_losses else 0)
+                avg_p = (sum(recent_p_losses) / len(recent_p_losses)
+                         if recent_p_losses else 0)
+                avg_v = (sum(recent_v_losses) / len(recent_v_losses)
+                         if recent_v_losses else 0)
+                avg_gen_time = (sum(recent_gen_times) / len(recent_gen_times)
+                                if recent_gen_times else 0)
+                avg_train_time = (sum(recent_train_times) / len(recent_train_times)
+                                  if recent_train_times else 0)
+                avg_game_len_recent = (sum(recent_game_lengths) / len(recent_game_lengths)
+                                       if recent_game_lengths else 0)
+
+                lr = optimizer.param_groups[0]['lr']
+                elapsed = time.time() - start_time
+
+                # --- 吞吐量 ---
+                games_per_sec = games_generated / max(1, elapsed)
+                samples_per_sec = total_samples_generated / max(1, elapsed)
+                steps_per_sec = update_step / max(1, elapsed)
+
+                # --- 每步教师评分耗时 (ms/move) ---
+                ms_per_move = (avg_gen_time * 1000 / max(1,
+                    sum(recent_gen_moves) / max(1, len(recent_gen_moves)))
+                    if recent_gen_moves else 0)
+
+                # --- GPU 内存 ---
+                gpu_mem_used = 0
+                gpu_mem_total = 1
+                if device == 'cuda':
+                    gpu_mem_used = torch.cuda.memory_allocated() / 1024**2
+                    gpu_mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+
+                # --- 打印 ---
+                print(f"[Game {games_generated:>6}/{total_games_target:<6}] "
+                      f"Loss={avg_loss:.4f}(P={avg_p:.4f} V={avg_v:.4f}) | "
+                      f"LR={lr:.6f} | Top1={acc['top1']:.1%}")
+                print(f"  Speed: "
+                      f"{games_per_sec:.2f} games/s | "
+                      f"{samples_per_sec:.0f} samples/s | "
+                      f"{steps_per_sec:.2f} train_steps/s")
+                print(f"  Timing: "
+                      f"gen={avg_gen_time:.1f}s | "
+                      f"train={avg_train_time:.1f}s | "
+                      f"game_len={avg_game_len_recent:.1f} | "
+                      f"{ms_per_move:.1f}ms/move")
+                print(f"  System: "
+                      f"Buffer={len(replay_buffer):,} | "
+                      f"Step={update_step} | "
+                      f"Samples={total_samples_generated:,} | "
+                      f"GPU={gpu_mem_used:.0f}MB | "
+                      f"Total={elapsed/60:.1f}min")
+                print("-" * 100)
+
+                # --- 提前收敛 (数据全部生成后) ---
+                if games_generated >= total_games_target:
+                    if acc['top1'] >= 0.85 and acc['top3'] >= 0.95:
+                        print(f"  [收敛] Top-1={acc['top1']:.2%}, "
+                              f"Top-3={acc['top3']:.2%} — 训练完成")
+                        break
+
+            # --- 数据全部生成, 继续纯训练 (定期打印状态) ---
+            if games_generated >= total_games_target:
+                if update_step >= max_steps:
+                    print(f"  [完成] 已达最大步数 {max_steps}")
+                    break
+
+                # 纯训练阶段: 每 DISTILL_LOG_STEPS 步打印一次状态
+                if update_step % (DISTILL_LOG_STEPS * 5) == 0:
+                    model.eval()
+                    eval_batch = replay_buffer.sample(
+                        min(batch_size, len(replay_buffer)),
+                        board_size, augment=False
+                    )
+                    acc = _compute_topk_accuracy(model, eval_batch, device)
+
+                    avg_loss = (sum(recent_losses) / len(recent_losses)
+                                if recent_losses else 0)
+                    avg_p = (sum(recent_p_losses) / len(recent_p_losses)
+                             if recent_p_losses else 0)
+                    avg_v = (sum(recent_v_losses) / len(recent_v_losses)
+                             if recent_v_losses else 0)
+                    lr = optimizer.param_groups[0]['lr']
+                    elapsed = time.time() - start_time
+                    steps_per_sec = update_step / max(1, elapsed)
+
+                    gpu_mem_used = 0
+                    if device == 'cuda':
+                        gpu_mem_used = torch.cuda.memory_allocated() / 1024**2
+
+                    print(f"[Train {update_step:>7}] "
+                          f"Loss={avg_loss:.4f}(P={avg_p:.4f} V={avg_v:.4f}) | "
+                          f"LR={lr:.6f} | Top1={acc['top1']:.1%} | "
+                          f"Buf={len(replay_buffer):,}")
+                    print(f"  Speed: {steps_per_sec:.2f} steps/s | "
+                          f"GPU={gpu_mem_used:.0f}MB | "
+                          f"Total={elapsed/60:.1f}min")
+                    print("-" * 100)
+
+                    if acc['top1'] >= 0.85 and acc['top3'] >= 0.95:
+                        print(f"  [收敛] Top-1={acc['top1']:.2%}, "
+                              f"Top-3={acc['top3']:.2%} — 训练完成")
+                        break
+
+    except KeyboardInterrupt:
+        # 最外层兜底
+        print("\n\n收到中断信号，正在最终保存...")
+    except Exception as e:
+        print(f"\n\n训练异常: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        # ====================================================
+        # 最终保存 (无论如何都会执行)
+        # ====================================================
+        print("\n保存最终状态...")
+        _save_distill_checkpoint(
+            model, optimizer, scheduler, scaler,
+            replay_buffer, buffer_path,
+            update_step, games_generated,
+            board_size, win_condition, model_tag,
+            distill_cfg, checkpoint_path, distill_model_path
+        )
+        print(f"Checkpoint → {checkpoint_path}")
+        print(f"权重       → {distill_model_path}")
+        print(f"训练数据   → {buffer_path}")
+
+    # --- 最终评估 ---
+    model.eval()
+    if len(replay_buffer) >= batch_size:
+        final_batch = replay_buffer.sample(
+            min(batch_size * 4, len(replay_buffer)),
+            board_size, augment=False
+        )
+        final_acc = _compute_topk_accuracy(model, final_batch, device)
+    else:
+        final_acc = {'top1': 0.0, 'top3': 0.0, 'top5': 0.0}
+
+    elapsed = time.time() - start_time
+    print(f"\n{'=' * 60}")
+    print(f"蒸馏训练总结")
+    print(f"{'=' * 60}")
+    print(f"生成对局数:     {games_generated:,} / {total_games_target:,}")
+    print(f"总样本数:       {len(replay_buffer):,}")
+    print(f"总训练步数:     {update_step:,}")
+    print(f"总耗时:         {elapsed/60:.1f} 分钟")
+    print(f"最终 Teacher Top-1: {final_acc['top1']:.2%}")
+    print(f"最终 Teacher Top-3: {final_acc['top3']:.2%}")
+    print(f"最终 Teacher Top-5: {final_acc['top5']:.2%}")
+    print(f"\n蒸馏模型已保存至: {distill_model_path}")
+    print(f"下一步: 关闭 --distill 标志, 加载该权重进行 MCTS 微调:")
+    print(f"  python train_alphazero.py --board_size {board_size} "
+          f"--model {model_tag}")
+    print(f"  (将自动加载 {distill_model_path} 作为初始权重)")
+    print(f"{'=' * 60}")
+
+
 def train(args):
-    """主训练函数"""
+    """主训练函数 (AlphaZero MCTS 自博弈)"""
     # ============================================================
     # 初始化
     # ============================================================
@@ -200,6 +787,7 @@ def train(args):
     pool_path = f'{prefix}_opponent_pool.pth'
     elo_path = f'{prefix}_elo.json'
     checkpoint_path = f'{prefix}_checkpoint.pth'
+    distill_model_path = f'{prefix}_distill.pth'  # 蒸馏产出的权重
 
     # ============================================================
     # 加载 checkpoint (完整恢复训练状态)
@@ -228,6 +816,17 @@ def train(args):
                 setattr(args, key, ckpt[key])
         resume_info = f"从 step={update_step}, games={total_games} 恢复, decay_steps={args.decay_steps}"
         print(f"  {resume_info}")
+    elif os.path.exists(distill_model_path):
+        # 加载蒸馏权重作为 MCTS 微调的起点
+        print(f"发现蒸馏权重: {distill_model_path}")
+        state = torch.load(distill_model_path, map_location=device, weights_only=False)
+        # distill 文件可能是完整 checkpoint dict 或纯 state_dict
+        if 'model_state_dict' in state:
+            model.load_state_dict(state['model_state_dict'])
+        else:
+            model.load_state_dict(state)
+        print(f"  已加载蒸馏权重作为初始模型 "
+              f"(策略已接近大师水平, MCTS 将在此基础上微调)")
     elif os.path.exists(model_path):
         load_model_if_exists(model, model_path)
         print(f"加载模型 (无 checkpoint): {model_path}")
@@ -758,10 +1357,55 @@ def main():
                         help='在 MCTS 搜索树中启用人类知识增强 (连五/挡四/活三检测), 默认关闭')
     parser.add_argument('--save_interval_hours', type=float, default=1.0,
                         help='自动保存间隔 (小时, 默认 1.0, 设为 0 禁用)')
+
+    # ============================================================
+    # 知识蒸馏参数 (--distill 启用时生效)
+    # ============================================================
+    parser.add_argument('--distill', action='store_true',
+                        help='启用知识蒸馏模式: 使用传统 AI 作为教师, '
+                             '快速将学生网络提升到大师水平。蒸馏完成后, '
+                             '关闭此标志加载蒸馏权重进行 MCTS 微调。')
+    parser.add_argument('--distill_temperature', type=float, default=3.0,
+                        help='蒸馏温度 T (默认 3.0)。T↑ → 教师策略更平滑, '
+                             '学生学到更多次级候选的相对优劣; '
+                             'T↓ → 策略更尖锐, 趋于 one-hot 模仿。'
+                             '推荐: 2.0~4.0')
+    parser.add_argument('--distill_value_weight', type=float, default=0.5,
+                        help='价值损失权重 λ_value (默认 0.5)。'
+                             '蒸馏阶段价值头信号较弱 (教师无估值), '
+                             '降低此权重让训练聚焦于策略匹配。'
+                             '推荐: 0.1~1.0')
+    parser.add_argument('--distill_lr', type=float, default=3e-3,
+                        help='蒸馏学习率 (默认 3e-3)。'
+                             '监督蒸馏收敛远快于 RL, 可用更高 LR。'
+                             '推荐: 1e-3~5e-3')
+    parser.add_argument('--distill_lr_min', type=float, default=1e-5,
+                        help='蒸馏最小学习率 (默认 1e-5)')
+    parser.add_argument('--distill_warmup_steps', type=int, default=500,
+                        help='蒸馏 LR 预热步数 (默认 500)')
+    parser.add_argument('--distill_decay_steps', type=int, default=50000,
+                        help='蒸馏 LR 衰减步数 (默认 50000)')
+    parser.add_argument('--distill_batch_size', type=int, default=2048,
+                        help='蒸馏训练 batch 大小 (默认 2048)。'
+                             '蒸馏数据 IID, 大 batch 提供更稳定梯度。'
+                             '推荐: 1024~4096')
+    parser.add_argument('--distill_games', type=int, default=50000,
+                        help='教师自我对弈局数 (默认 50000)。'
+                             '10×10: 50000 局 ≈ 2M 样本, 足以收敛。'
+                             '15×15: 20000~30000 局即可。'
+                             '5×5:   10000 局足够。')
+    parser.add_argument('--distill_random_frac', type=float, default=0.2,
+                        help='随机开局比例 (默认 0.2)。'
+                             '混入随机走子产生的局面, 强制学生在非均衡'
+                             '状态下也模仿教师, 增强泛化性。')
     args = parser.parse_args()
 
     update_config_from_cli(args)
-    train(args)
+
+    if args.distill:
+        train_distill(args)
+    else:
+        train(args)
 
 
 if __name__ == '__main__':
