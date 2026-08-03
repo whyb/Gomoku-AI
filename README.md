@@ -34,6 +34,7 @@
 - 动态shape版本支持训练期间的棋盘与推理期间的棋盘尺寸不一致，模型具有泛化性。
 - Player1 与 Kali-Hac Gomoku-AI 交替先手对战，Player1 作为训练目标。（新版本，动态模型版本）
 - AlphaZero 风格训练：MCTS 自博弈 + 对手池 + D4 对称增强 + SE-ResNet 架构，模型持续进化
+- 两阶段训练（推荐）：先通过传统 AI 教师 (Kali-Hac) 知识蒸馏快速达到大师级审局，再 MCTS 自博弈微调超越教师
 
 
 ## 依赖
@@ -94,6 +95,62 @@ python train_alphazero.py --board_size 15 --num_simulations 400 --model small --
 
 ```
 
+### 两阶段训练（推荐）
+
+直接从随机初始化开始 MCTS 强化学习收敛很慢（RL 稀疏奖励），本项目采用**两阶段训练**：先用传统 AI 教师快速"模仿大师"（知识蒸馏），再通过自博弈"超越教师"（MCTS 微调）：
+
+```
+阶段 1: 蒸馏 (--distill)              阶段 2: MCTS 微调 (正常训练)
+┌──────────────────────┐              ┌──────────────────────┐
+│ 教师 AI (Kali-Hac)    │  加载权重    │ MCTS + 自博弈         │
+│   ↓ 自我对弈          │ ──────────→  │   ↓                  │
+│ (state, π_teacher, z) │  自动衔接     │ 强化学习微调          │
+│   ↓                   │              │   ↓                  │
+│ KL 散度 + MSE 训练    │              │ 超越教师             │
+└──────────────────────┘              └──────────────────────┘
+```
+
+#### 阶段 1：知识蒸馏 — 快速模仿大师
+
+**目的**：让随机初始化的网络迅速学到教师 AI 的审局能力（"形似"）。
+
+| 特性 | 说明 |
+|------|------|
+| 数据来源 | 教师 AI (Kali-Hac) 自我对弈，非 MCTS |
+| 损失函数 | `L = KL(teacher_soft \|\| student_soft) × T² + λ × MSE(v, z)` |
+| 温度 T | 默认 3.0（`--distill_temperature`），教师评分经 log 压缩 + 温度缩放 → 软化概率分布 |
+| 价值头权重 | 默认 0.5（`--distill_value_weight`），教师无精确估值，训练聚焦策略匹配 |
+| 随机开局 | 默认 20%（`--distill_random_frac`），先随机走 4~12 步，强制教师处理"烂摊子"局面 |
+| 数据效率 | 纯监督学习，收敛极快（5 万局可达 Top-1 80%+） |
+| 推荐局数 | 10×10: 5 万局；15×15: 2~3 万局；5×5: 1 万局 |
+
+#### 阶段 2：MCTS 微调 — 超越教师
+
+关闭 `--distill` 后正常训练会**自动加载蒸馏权重**作为初始权重（优先 `*_distill_best.pth`，其次 `*_distill.pth`），进行标准 AlphaZero MCTS 自博弈微调，突破教师水平上限。
+
+```shell
+# 第一阶段：蒸馏（15×15，2 万局，约 1-3 小时）
+python train_alphazero.py --board_size 15 --model standard \
+    --distill --distill_games 20000
+
+# 第二阶段：MCTS 微调（自动加载蒸馏权重）
+python train_alphazero.py --board_size 15 --model standard \
+    --num_simulations 400
+```
+
+#### 为什么需要两阶段？
+
+| 维度 | 纯蒸馏 | 纯 MCTS（随机初始化） | 蒸馏 → MCTS |
+|------|--------|----------------------|-------------|
+| 训练速度 | 快（监督学习） | 慢（RL 稀疏奖励） | 快 → 慢 |
+| 棋力上限 | = 教师水平 | 可超越教师 | **可超越教师** |
+| 泛化能力 | 差（怕"无理手"） | 强（探索驱动） | **强** |
+| 状态分布 | 窄（教师风格） | 宽（MCTS 探索） | 窄 → 宽 |
+
+> **分布偏移 (Distribution Shift)**：蒸馏数据全部来自教师自我对弈，状态空间窄，遇到不按教师套路走的对手（如乱下、MCTS 怪异走法）容易犯错。`--distill_random_frac` 只能部分缓解，根本方案是 MCTS 微调——模型通过自博弈探索海量新状态。
+>
+> **蒸馏崩塌防护（已实现）**：最佳模型追踪（Top1 每提升 ≥0.5% 保存 `*_distill_best.pth`）、三级崩溃检测（Top1 归零 / 相对最佳暴跌 70% / Loss 暴增 3×）、自动恢复最佳 checkpoint、连续 20 次评估无提升自动早停。
+
 ### 训练量预估（15×15 棋盘，400 MCTS 模拟/步）
 
 | 场景 | 小模型 `--model small` | 标准模型 `--model standard` | 预期水平 |
@@ -116,6 +173,9 @@ python train_alphazero.py --board_size 15 --num_simulations 400 --model small --
 | `alpaz_standard_15x15_checkpoint.pth` | 完整断点（含优化器/调度器状态，可续训） |
 | `alpaz_standard_15x15_opponent_pool.pth` | 对手池（含历史模型快照） |
 | `alpaz_standard_15x15_elo.json` | Elo 评分记录 |
+| `alpaz_standard_15x15_distill.pth` | 蒸馏最终权重（关闭 `--distill` 后自动加载，MCTS 微调起点） |
+| `alpaz_standard_15x15_distill_best.pth` | 蒸馏最佳权重（Top1 新高时保存，崩溃检测时自动恢复） |
+| `alpaz_standard_15x15_best.pth` | MCTS 微调阶段最佳模型（Elo 新高时保存） |
 
 与传统训练方式相比，AlphaZero 流水线具备以下特性：
 
