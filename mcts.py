@@ -91,6 +91,20 @@ def _find_opponent_threats(board: np.ndarray, player: int,
                 if not (0 <= end_x < h and 0 <= end_y < w):
                     continue
 
+                # 快速跳过: 窗口中没有对手棋子则不可能是威胁
+                has_opp = False
+                has_own = False
+                for k in range(win_condition):
+                    cx, cy = x + k * dx, y + k * dy
+                    v = board[cx, cy]
+                    if v == opponent:
+                        has_opp = True
+                        break  # 有对手棋子, 需详细检查
+                    elif v == player:
+                        has_own = True
+                if not has_opp:
+                    continue  # 窗口中没有对手棋子, 跳过
+
                 opp_cnt = 0
                 own_cnt = 0
                 empties = []
@@ -101,6 +115,7 @@ def _find_opponent_threats(board: np.ndarray, player: int,
                         opp_cnt += 1
                     elif v == player:
                         own_cnt += 1
+                        break  # 我方棋子堵住了这条线, 无需继续
                     else:
                         empties.append((cx, cy))
 
@@ -124,7 +139,7 @@ def get_forced_move(board: np.ndarray, player: int,
     """
     查找强制走法（规则短路），优先级：
       1. 自己能连五 → 直接获胜
-      2. 对手有唯一必堵点 → 必须堵
+      2. 对手有必堵点 (冲四/连四/跳四) → 必须堵 (即使有多个也挑一个)
       3. 对手已有连五点（兜底检测）
     返回: (action, reason) 或 (None, None)
     """
@@ -139,8 +154,15 @@ def get_forced_move(board: np.ndarray, player: int,
     threats = _find_opponent_threats(board, player, win_condition)
     must_block = threats['must_block']
 
-    # 唯一必堵点 → 强制走法
     if len(must_block) == 1:
+        return must_block.pop(), 'block'
+    elif len(must_block) >= 2:
+        # 多个必堵点: 优先选同时覆盖 threats (活三/冲三) 的交叉点
+        # 旧逻辑: 冲四永远强制堵, 跳过 MCTS 以提速
+        threat_points = threats['threats']
+        overlap = must_block & threat_points
+        if overlap:
+            return overlap.pop(), 'block'
         return must_block.pop(), 'block'
 
     # 3. 兜底: 对手已有连五点 (理论上前面已覆盖，此处保底)
@@ -230,7 +252,10 @@ class MCTSNode:
         return best_action, best_child
 
     def expand(self, policy: np.ndarray, valid_actions: np.ndarray,
-               current_player: int):
+               current_player: int,
+               add_noise: bool = False,
+               dirichlet_alpha: float = 0.3,
+               dirichlet_epsilon: float = 0.25):
         """
         扩展节点: 根据策略网络的输出创建子节点
 
@@ -238,19 +263,32 @@ class MCTSNode:
             policy: 策略网络输出的 logits (board_size² 维)
             valid_actions: 合法动作的 bool 数组
             current_player: 当前玩家 (1 或 2)
+            add_noise: 是否添加 Dirichlet 噪声 (仅根节点)
+            dirichlet_alpha: Dirichlet 噪声 alpha 参数
+            dirichlet_epsilon: 噪声混合比例
         """
         self.current_player = current_player
         self.is_expanded = True
 
-        # 纯 numpy softmax (避免 torch tensor 创建开销)
-        masked = np.where(valid_actions, policy, -1e9).astype(np.float64)
-        masked -= masked.max()
-        exp = np.exp(masked)
-        exp = np.where(valid_actions, exp, 0.0)
-        s = exp.sum()
-        probs = exp / s if s > 0 else valid_actions.astype(np.float64) / max(1, valid_actions.sum())
+        valid_indices = np.flatnonzero(valid_actions)
+        valid_count = len(valid_indices)
 
-        for a in np.flatnonzero(valid_actions):
+        # 纯 numpy softmax (float32, 避免 torch tensor 创建开销)
+        masked = np.where(valid_actions, policy, -1e9).astype(np.float32)
+        masked -= masked.max()
+        exp = np.exp(masked.astype(np.float64))  # exp 用 float64 保精度, 避免 float32 下溢
+        exp = np.where(valid_actions, exp, 0.0).astype(np.float32)
+        s = exp.sum()
+        probs = exp / s if s > 0 else valid_actions.astype(np.float32) / max(1, valid_actions.sum())
+
+        # Dirichlet 噪声: 在概率空间混合 (AlphaZero 标准做法)
+        if add_noise and valid_count > 0:
+            noise = np.random.dirichlet([dirichlet_alpha] * valid_count)
+            for idx, i in enumerate(valid_indices):
+                probs[i] = (1 - dirichlet_epsilon) * probs[i] + dirichlet_epsilon * noise[idx]
+            probs /= probs.sum()
+
+        for a in valid_indices:
             self.children[int(a)] = MCTSNode(prior=float(probs[a]), parent=self, action=int(a))
 
     def backup(self, value: float):
@@ -429,25 +467,13 @@ class MCTS:
         # 评估根节点 → logits
         policy, _ = self._evaluate(state)
 
-        # softmax → 概率, 再混合 Dirichlet 噪声 (AlphaZero 标准做法: 在概率空间混合)
-        masked = np.where(valid_actions, policy, -1e9).astype(np.float64)
-        masked -= masked.max()
-        exp = np.exp(masked)
-        exp = np.where(valid_actions, exp, 0.0)
-        probs = exp / exp.sum()
-
-        if add_noise and valid_count > 0:
-            noise = np.random.dirichlet([self.dirichlet_alpha] * valid_count)
-            j = 0
-            for i in np.flatnonzero(valid_actions):
-                probs[i] = (1 - self.dirichlet_epsilon) * probs[i] + self.dirichlet_epsilon * noise[j]
-                j += 1
-            probs /= probs.sum()
-
         # 从棋盘推导当前玩家: P1 先手, 棋子数相等→P1, 否则 P2
         current_player = 1 if (board == 1).sum() == (board == 2).sum() else 2
-        # 传入 log(probs), expand 内部会 softmax 还原为概率
-        root.expand(np.log(probs + 1e-10), valid_actions, current_player=current_player)
+        # 传入 logits, expand 内部做 softmax + 噪声混合
+        root.expand(policy, valid_actions, current_player=current_player,
+                    add_noise=add_noise,
+                    dirichlet_alpha=self.dirichlet_alpha,
+                    dirichlet_epsilon=self.dirichlet_epsilon)
 
         # 主搜索循环
         for sim in range(self.num_simulations):
@@ -623,25 +649,13 @@ class BatchMCTS:
         policy, _ = self._evaluate_batch([state])
         policy = policy[0]
 
-        # softmax → 概率, 再混合 Dirichlet 噪声 (AlphaZero 标准做法: 在概率空间混合)
-        masked = np.where(valid_actions, policy, -1e9).astype(np.float64)
-        masked -= masked.max()
-        exp = np.exp(masked)
-        exp = np.where(valid_actions, exp, 0.0)
-        probs = exp / exp.sum()
-
-        if add_noise and valid_count > 0:
-            noise = np.random.dirichlet([self.dirichlet_alpha] * valid_count)
-            j = 0
-            for i in np.flatnonzero(valid_actions):
-                probs[i] = (1 - self.dirichlet_epsilon) * probs[i] + self.dirichlet_epsilon * noise[j]
-                j += 1
-            probs /= probs.sum()
-
         # 从棋盘推导当前玩家: P1 先手, 棋子数相等→P1, 否则 P2
         current_player = 1 if (board == 1).sum() == (board == 2).sum() else 2
-        # 传入 log(probs), expand 内部会 softmax 还原为概率
-        root.expand(np.log(probs + 1e-10), valid_actions, current_player=current_player)
+        # 传入 logits, expand 内部做 softmax + 噪声混合
+        root.expand(policy, valid_actions, current_player=current_player,
+                    add_noise=add_noise,
+                    dirichlet_alpha=self.dirichlet_alpha,
+                    dirichlet_epsilon=self.dirichlet_epsilon)
 
         sim_count = 0
         while sim_count < self.num_simulations:

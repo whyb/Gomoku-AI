@@ -475,6 +475,14 @@ def train_distill(args):
     recent_gen_moves = deque(maxlen=20)       # 每批生成的样本数
     total_samples_generated = 0               # 累计样本数
 
+    # 早停 & 最佳模型追踪
+    best_top1 = 0.0
+    best_model_path = f'{prefix}_distill_best.pth'
+    patience_counter = 0
+    patience_limit = 20       # 连续 20 次评估无提升 → 停止
+    min_improvement = 0.005   # Top1 提升不足 0.5% 不算有效提升
+    loss_spike_threshold = 3.0  # loss 超过近期均值 3 倍视为爆炸
+
     print(f"\n开始蒸馏训练... (Ctrl+C 安全退出并保存)")
     print("-" * 100)
 
@@ -665,6 +673,72 @@ def train_distill(args):
                               f"Top-3={acc['top3']:.2%} — 训练完成")
                         break
 
+                    # 最佳模型追踪 + 早停 + 崩溃检测
+                    if acc['top1'] > best_top1 + min_improvement:
+                        if best_top1 > 0:
+                            print(f"  [新高] Top1 {best_top1:.1%} → {acc['top1']:.1%}")
+                        best_top1 = acc['top1']
+                        patience_counter = 0
+                        torch.save(model.state_dict(), best_model_path)
+                    else:
+                        patience_counter += 1
+
+                    avg_loss_recent = (sum(recent_losses) / len(recent_losses)
+                                       if recent_losses else 0)
+                    # 崩溃检测: 绝对零 + 相对暴跌
+                    top1_crashed = (acc['top1'] < 0.01 and best_top1 > 0.10)
+                    top1_plummeted = (best_top1 > 0.20 and
+                                      acc['top1'] < best_top1 * 0.3)
+                    loss_exploded = (avg_loss_recent > loss_spike_threshold and
+                                     best_top1 > 0.10)
+
+                    if top1_crashed or top1_plummeted or loss_exploded:
+                        reason = ("Top1→0%" if top1_crashed else
+                                  f"Top1 {best_top1:.1%}→{acc['top1']:.1%}" if top1_plummeted else
+                                  f"Loss={avg_loss_recent:.1f}")
+                        print(f"  ⚠️ [崩溃检测] {reason}, "
+                              f"恢复最佳 checkpoint (Top1={best_top1:.1%})")
+                        if os.path.exists(best_model_path):
+                            model.load_state_dict(torch.load(best_model_path,
+                                                map_location=device, weights_only=True))
+                        running = False
+                        break
+
+                    if patience_counter >= patience_limit:
+                        print(f"  [早停] Top1 连续 {patience_limit} 次无提升 "
+                              f"(最佳={best_top1:.1%}), 停止训练")
+                        running = False
+                        break
+
+                # --- 最佳模型追踪 ---
+                if acc['top1'] > best_top1 + min_improvement:
+                    best_top1 = acc['top1']
+                    patience_counter = 0
+                    torch.save(model.state_dict(), best_model_path)
+                else:
+                    patience_counter += 1
+
+                # --- 损失爆炸检测 ---
+                avg_loss_recent = (sum(recent_losses) / len(recent_losses)
+                                   if recent_losses else 0)
+                if (avg_loss_recent > loss_spike_threshold and
+                    best_top1 > 0.10 and acc['top1'] < 0.01):
+                    print(f"  ⚠️ [崩溃检测] Loss={avg_loss_recent:.1f} 异常飙升, "
+                          f"Top1={acc['top1']:.1%} → 0%, "
+                          f"模型已退化! 恢复最佳 checkpoint (Top1={best_top1:.1%})")
+                    if os.path.exists(best_model_path):
+                        model.load_state_dict(torch.load(best_model_path,
+                                            map_location=device, weights_only=True))
+                    running = False
+                    break
+
+                # --- 早停 ---
+                if patience_counter >= patience_limit:
+                    print(f"  [早停] Top1 连续 {patience_limit} 次无提升 "
+                          f"(最佳={best_top1:.1%}), 停止训练")
+                    running = False
+                    break
+
             # --- 数据全部生成, 继续纯训练 (定期打印状态) ---
             if games_generated >= total_games_target:
                 if update_step >= max_steps:
@@ -706,6 +780,43 @@ def train_distill(args):
                     if acc['top1'] >= 0.85 and acc['top3'] >= 0.95:
                         print(f"  [收敛] Top-1={acc['top1']:.2%}, "
                               f"Top-3={acc['top3']:.2%} — 训练完成")
+                        break
+
+                    # 最佳模型追踪 + 早停 + 崩溃检测
+                    if acc['top1'] > best_top1 + min_improvement:
+                        if best_top1 > 0:
+                            print(f"  [新高] Top1 {best_top1:.1%} → {acc['top1']:.1%}")
+                        best_top1 = acc['top1']
+                        patience_counter = 0
+                        torch.save(model.state_dict(), best_model_path)
+                    else:
+                        patience_counter += 1
+
+                    avg_loss_recent = (sum(recent_losses) / len(recent_losses)
+                                       if recent_losses else 0)
+                    # 崩溃检测: 绝对零 + 相对暴跌
+                    top1_crashed = (acc['top1'] < 0.01 and best_top1 > 0.10)
+                    top1_plummeted = (best_top1 > 0.20 and
+                                      acc['top1'] < best_top1 * 0.3)
+                    loss_exploded = (avg_loss_recent > loss_spike_threshold and
+                                     best_top1 > 0.10)
+
+                    if top1_crashed or top1_plummeted or loss_exploded:
+                        reason = ("Top1→0%" if top1_crashed else
+                                  f"Top1 {best_top1:.1%}→{acc['top1']:.1%}" if top1_plummeted else
+                                  f"Loss={avg_loss_recent:.1f}")
+                        print(f"  ⚠️ [崩溃检测] {reason}, "
+                              f"恢复最佳 checkpoint (Top1={best_top1:.1%})")
+                        if os.path.exists(best_model_path):
+                            model.load_state_dict(torch.load(best_model_path,
+                                                map_location=device, weights_only=True))
+                        running = False
+                        break
+
+                    if patience_counter >= patience_limit:
+                        print(f"  [早停] Top1 连续 {patience_limit} 次无提升 "
+                              f"(最佳={best_top1:.1%}), 停止训练")
+                        running = False
                         break
 
     except KeyboardInterrupt:
@@ -753,11 +864,16 @@ def train_distill(args):
     print(f"最终 Teacher Top-1: {final_acc['top1']:.2%}")
     print(f"最终 Teacher Top-3: {final_acc['top3']:.2%}")
     print(f"最终 Teacher Top-5: {final_acc['top5']:.2%}")
-    print(f"\n蒸馏模型已保存至: {distill_model_path}")
-    print(f"下一步: 关闭 --distill 标志, 加载该权重进行 MCTS 微调:")
+    print(f"\n蒸馏模型已保存:")
+    print(f"  最终权重: {distill_model_path}")
+    if best_top1 > 0.01 and os.path.exists(best_model_path):
+        print(f"  最佳权重: {best_model_path} (Top1={best_top1:.1%})")
+    print(f"下一步: 关闭 --distill 标志, 加载权重进行 MCTS 微调:")
     print(f"  python train_alphazero.py --board_size {board_size} "
           f"--model {model_tag}")
     print(f"  (将自动加载 {distill_model_path} 作为初始权重)")
+    if best_top1 > 0.01 and os.path.exists(best_model_path):
+        print(f"  提示: 也可手动加载 {best_model_path} (蒸馏最佳)")
     print(f"{'=' * 60}")
 
 
@@ -784,10 +900,12 @@ def train(args):
     # 所有持久化文件路径 (统一前缀, 方便管理)
     prefix = f'alpaz_{model_tag}_{board_size}x{board_size}'
     model_path = f'{prefix}_model.pth'
+    best_model_path = f'{prefix}_best.pth'             # MCTS 最佳模型
     pool_path = f'{prefix}_opponent_pool.pth'
     elo_path = f'{prefix}_elo.json'
     checkpoint_path = f'{prefix}_checkpoint.pth'
-    distill_model_path = f'{prefix}_distill.pth'  # 蒸馏产出的权重
+    distill_model_path = f'{prefix}_distill.pth'         # 蒸馏最终权重
+    distill_best_path = f'{prefix}_distill_best.pth'     # 蒸馏最佳权重 (优先)
 
     # ============================================================
     # 加载 checkpoint (完整恢复训练状态)
@@ -816,11 +934,19 @@ def train(args):
                 setattr(args, key, ckpt[key])
         resume_info = f"从 step={update_step}, games={total_games} 恢复, decay_steps={args.decay_steps}"
         print(f"  {resume_info}")
+    elif os.path.exists(distill_best_path):
+        # 优先加载蒸馏最佳权重 (distill_best.pth)
+        print(f"发现蒸馏最佳权重: {distill_best_path}")
+        state = torch.load(distill_best_path, map_location=device, weights_only=False)
+        if 'model_state_dict' in state:
+            model.load_state_dict(state['model_state_dict'])
+        else:
+            model.load_state_dict(state)
+        print(f"  已加载蒸馏最佳权重 (策略已接近大师水平, MCTS 将在此基础上微调)")
     elif os.path.exists(distill_model_path):
         # 加载蒸馏权重作为 MCTS 微调的起点
         print(f"发现蒸馏权重: {distill_model_path}")
         state = torch.load(distill_model_path, map_location=device, weights_only=False)
-        # distill 文件可能是完整 checkpoint dict 或纯 state_dict
         if 'model_state_dict' in state:
             model.load_state_dict(state['model_state_dict'])
         else:
@@ -987,6 +1113,15 @@ def train(args):
     recent_train_times = deque(maxlen=20)
     recent_game_lengths = deque(maxlen=100)
     recent_games_per_iter = deque(maxlen=20)
+    recent_losses_mcts = deque(maxlen=200)   # MCTS 训练损失滑动窗口
+
+    # 崩溃检测 & 最佳模型 (MCTS 用 Elo/胜率做指标)
+    best_elo = elo.get_rating('current') if elo.get_rating('current') > 0 else 1500
+    mcts_patience = 0
+    mcts_patience_limit = 30        # 连续 30 次评估无提升 → 停止
+    mcts_min_improvement = 10       # Elo 提升不足 10 分不算有效提升
+    mcts_loss_spike = 5.0           # Policy loss 超过此值视为异常
+    mcts_collapse_elo_drop = 200    # Elo 相对最佳跌超 200 分 → 崩溃
 
     def signal_handler(sig, frame):
         nonlocal running
@@ -1047,6 +1182,7 @@ def train(args):
                     train_stats['p_loss'] += p_loss
                     train_stats['v_loss'] += v_loss
                     train_stats['steps'] += 1
+                    recent_losses_mcts.append(p_loss)
                 trained_this_round += 1
 
             if trained_this_round == 0:
@@ -1202,6 +1338,45 @@ def train(args):
                     elo.update('random', 'current')
             eval_ran = True
 
+            # --- MCTS 崩溃检测 & 最佳模型 ---
+            current_elo = elo.get_rating('current')
+            avg_p_loss_recent = (sum(recent_losses_mcts) / len(recent_losses_mcts)
+                                 if recent_losses_mcts else 0)
+
+            # 1) 最佳 Elo 追踪
+            if current_elo > best_elo + mcts_min_improvement:
+                if best_elo > 1500:
+                    print(f"  [新高] Elo {best_elo:.0f} → {current_elo:.0f} "
+                          f"(+{current_elo - best_elo:.0f})")
+                best_elo = current_elo
+                mcts_patience = 0
+                torch.save(model.state_dict(), best_model_path)
+                print(f"  [保存] 最佳模型 → {best_model_path}")
+            else:
+                mcts_patience += 1
+
+            # 2) Policy loss 异常飙升
+            if avg_p_loss_recent > mcts_loss_spike:
+                print(f"  ⚠️ [异常] Policy loss={avg_p_loss_recent:.2f} > "
+                      f"{mcts_loss_spike}, 可能存在训练不稳定")
+
+            # 3) Elo 崩塌检测
+            if best_elo > 1600 and current_elo < best_elo - mcts_collapse_elo_drop:
+                print(f"  ⚠️ [崩溃检测] Elo 从 {best_elo:.0f} 暴跌至 "
+                      f"{current_elo:.0f} (跌 {best_elo - current_elo:.0f} > "
+                      f"{mcts_collapse_elo_drop}), 恢复最佳 checkpoint!")
+                if os.path.exists(best_model_path):
+                    model.load_state_dict(torch.load(best_model_path,
+                                        map_location=device, weights_only=True))
+                    print(f"  已恢复最佳模型 (Elo={best_elo:.0f})")
+                mcts_patience = 0  # 重置, 给恢复后的模型学习机会
+
+            # 4) 早停
+            if mcts_patience >= mcts_patience_limit:
+                print(f"  [早停] Elo 连续 {mcts_patience_limit} 次评估无提升 "
+                      f"(最佳={best_elo:.0f}), 停止训练")
+                running = False
+
         # ---- 打印详细状态 ----
         elapsed = time.time() - start_time
         lr = optimizer.param_groups[0]['lr']
@@ -1313,6 +1488,9 @@ def train(args):
 
     elapsed = time.time() - start_time
     print(f"\n=== 训练统计 ===")
+    print(f"最佳 Elo:     {best_elo:.0f}")
+    if os.path.exists(best_model_path):
+        print(f"最佳模型:     {best_model_path}")
     print(f"总对局数:    {total_games:,}")
     print(f"总样本数:    {total_samples:,}")
     print(f"总训练步数:  {update_step:,}")
