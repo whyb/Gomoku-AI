@@ -664,8 +664,6 @@ class BatchMCTS:
             batch_states = []
             batch_boards = []
 
-            visited_in_batch = set()  # 防止同一 batch 内重复选中未展开节点
-
             for _ in range(self.batch_size):
                 if sim_count >= self.num_simulations:
                     break
@@ -683,10 +681,9 @@ class BatchMCTS:
                     sim_board[x, y] = node.parent.current_player
                     search_path.append(node)
 
-                # 去重: 同一 batch 内叶节点尚未 expand, PUCT 不变, 会被重复选中
-                if id(node) in visited_in_batch:
-                    continue
-                visited_in_batch.add(id(node))
+                # 注意: 不按 id 去重。同一 batch 内树尚未变化, PUCT 确定性选择
+                # 会反复选中同一叶子; 这些重复叶子共享同一次 NN 批推理 (快)，
+                # 若用 visited 去重则每个 batch 只剩 1 片叶子, 批量加速完全失效。
 
                 parent = search_path[-2] if len(search_path) >= 2 else root
                 last_action = node.action
