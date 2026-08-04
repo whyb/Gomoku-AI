@@ -110,7 +110,7 @@ class Arena:
 
         p1_wins = 0
         p2_wins = 0
-        draws = 0
+        ties = 0
         p1_first_wins = 0
         p1_second_wins = 0
 
@@ -130,7 +130,7 @@ class Arena:
                 elif winner == 2:
                     p2_wins += 1
                 else:
-                    draws += 1
+                    ties += 1
             else:
                 # player2 先手
                 winner = self.play_game(player2_fn, player1_fn, opening, temperature)
@@ -140,17 +140,17 @@ class Arena:
                 elif winner == 1:
                     p2_wins += 1
                 else:
-                    draws += 1
+                    ties += 1
 
         total = num_games
         return {
             'total_games': total,
             'p1_wins': p1_wins,
             'p2_wins': p2_wins,
-            'draws': draws,
+            'ties': ties,
             'p1_win_rate': p1_wins / total if total > 0 else 0,
             'p2_win_rate': p2_wins / total if total > 0 else 0,
-            'draw_rate': draws / total if total > 0 else 0,
+            'tie_rate': ties / total if total > 0 else 0,
             'p1_first_win_rate': p1_first_wins / (total // 2) if total > 1 else 0,
             'p1_second_win_rate': p1_second_wins / (total // 2) if total > 1 else 0,
         }
@@ -221,7 +221,7 @@ def evaluate_model_strength(model_new, model_baseline, board_size: int,
     print(f"\n评估结果 ({num_games} 局):")
     print(f"  新模型胜率: {result['p1_win_rate']:.1%}")
     print(f"  基线胜率:   {result['p2_win_rate']:.1%}")
-    print(f"  平局率:     {result['draw_rate']:.1%}")
+    print(f"  平局率:     {result['tie_rate']:.1%}")
     print(f"  新模型先手胜率: {result['p1_first_win_rate']:.1%}")
     print(f"  新模型后手胜率: {result['p1_second_win_rate']:.1%}")
 
@@ -245,4 +245,4 @@ if __name__ == '__main__':
 
     result = arena.play_match(random_player, random_player, num_games=20)
     print(f"随机 vs 随机: P1={result['p1_win_rate']:.1%}, "
-          f"P2={result['p2_win_rate']:.1%}, 平={result['draw_rate']:.1%}")
+          f"P2={result['p2_win_rate']:.1%}, 平={result['tie_rate']:.1%}")

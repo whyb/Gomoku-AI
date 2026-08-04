@@ -344,12 +344,12 @@ def train():
 
     total_win1 = 0
     total_win2 = 0
-    total_draws = 0
+    total_ties = 0
     total_episodes = 0
     first_player1_wins = 0
-    first_player1_draws = 0
+    first_player1_ties = 0
     first_player2_wins = 0
-    first_player2_draws = 0
+    first_player2_ties = 0
     total_first1 = 0
     total_first2 = 0
     cpu_episodes = 0
@@ -426,8 +426,8 @@ def train():
                     elif winner == 2:
                         total_win2 += 1
                     else:
-                        total_draws += 1
-                        first_player1_draws += 1
+                        total_ties += 1
+                        first_player1_ties += 1
                 else:
                     total_first2 += 1
                     if winner == 1:
@@ -436,8 +436,8 @@ def train():
                         total_win2 += 1
                         first_player2_wins += 1
                     else:
-                        total_draws += 1
-                        first_player2_draws += 1
+                        total_ties += 1
+                        first_player2_ties += 1
                 
                 if exp_data.get('device_type') == 'cpu':
                     cpu_episodes += 1
@@ -471,16 +471,16 @@ def train():
 
                 # AI先手情况下的统计
                 f1_win_rate = (first_player1_wins / total_first1 * 100 if total_first1 else 0)
-                f1_draw_rate = (first_player1_draws / total_first1 * 100 if total_first1 else 0)
+                f1_tie_rate = (first_player1_ties / total_first1 * 100 if total_first1 else 0)
 
                 # 陪练先手情况下的统计 (陪练的胜率)
                 f2_win_rate = (first_player2_wins / total_first2 * 100 if total_first2 else 0)
-                f2_draw_rate = (first_player2_draws / total_first2 * 100 if total_first2 else 0)
+                f2_tie_rate = (first_player2_ties / total_first2 * 100 if total_first2 else 0)
 
                 print(f"[进度] 第 {total_episodes}/{Config.MAX_EPISODES} 局")
                 print(f"  AI总胜率: P1: {win_rate1:.1f}% ({total_win1}/{total_episodes - total_win1})")
-                print(f"  AI先手的胜率: AI先手: {f1_win_rate:.1f}% |  平局率: {f1_draw_rate:.1f}%")
-                print(f"  陪练先手的胜率: {f2_win_rate:.1f}% | 平局率: {f2_draw_rate:.1f}%")
+                print(f"  AI先手的胜率: AI先手: {f1_win_rate:.1f}% |  平局率: {f1_tie_rate:.1f}%")
+                print(f"  陪练先手的胜率: {f2_win_rate:.1f}% | 平局率: {f2_tie_rate:.1f}%")
                 
                 if training_info["loss1"] is not None:
                     current_lr = optimizer.param_groups[0]['lr']

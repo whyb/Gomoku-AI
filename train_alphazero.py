@@ -23,6 +23,8 @@ import argparse
 import random
 import warnings
 import threading
+import shutil
+import glob
 import numpy as np
 from collections import deque
 from typing import List, Tuple
@@ -72,6 +74,37 @@ GAMES_PER_EVAL = 1             # 评估对局数
 GAMES_PER_ITERATION = 16       # 每次迭代生成的对局数
 L2_COEFF = 1e-4                # L2 正则系数
 GAMMA = 1.0                    # 折扣因子 (AlphaZero 用 1.0, 不折扣)
+
+
+# ============================================================
+# 权重备份
+# ============================================================
+
+def backup_checkpoint_files(prefix: str, model_tag: str,
+                            save_dir: str = 'pretrained_models') -> str:
+    """
+    将当前目录下的 {prefix}_*.pth 权重备份一份到
+    ./pretrained_models/{model_tag}/{当前时间}/ 目录
+
+    例如: ./pretrained_models/standard/2026-08-03 17_46_59/
+    (时间格式中冒号不能作为文件夹名, 用下划线代替)
+
+    Args:
+        prefix: 文件前缀 (如 alpaz_standard_15x15)
+        model_tag: 模型标签 (small / standard), 用于子目录名
+        save_dir: 备份根目录 (默认 ./pretrained_models)
+    Returns:
+        备份目录路径
+    """
+    timestamp = time.strftime('%Y-%m-%d %H_%M_%S')
+    backup_dir = os.path.join(save_dir, model_tag, timestamp)
+    os.makedirs(backup_dir, exist_ok=True)
+    copied = 0
+    for path in glob.glob(f'{prefix}_*.pth'):
+        shutil.copy2(path, os.path.join(backup_dir, os.path.basename(path)))
+        copied += 1
+    print(f"  备份权重 → {backup_dir} ({copied} 个 .pth 文件)")
+    return backup_dir
 
 
 class ReplayBuffer:
@@ -590,6 +623,8 @@ def train_distill(args):
                             board_size, win_condition, model_tag,
                             distill_cfg, checkpoint_path, distill_model_path
                         )
+                        # 定时保存时同时备份一份权重到 pretrained_models/
+                        backup_checkpoint_files(prefix, model_tag)
                         last_save_time = time.time()
                         print(f"  [自动保存] 定时触发 @ {time.time() - start_time:.0f}s "
                               f"(间隔 {save_interval_sec/3600:.1f}h) "
@@ -1060,7 +1095,7 @@ def train(args):
     # ============================================================
     # 定义 checkpoint 保存/加载函数
     # ============================================================
-    def save_checkpoint(tag='auto'):
+    def save_checkpoint(tag='auto', backup=False):
         """保存完整 checkpoint"""
         torch.save({
             # 模型
@@ -1096,6 +1131,10 @@ def train(args):
         # 保存对手池和 Elo
         opponent_pool.save(pool_path)
         elo.save(elo_path)
+
+        if backup:
+            # 定时保存时同时备份一份权重到 pretrained_models/
+            backup_checkpoint_files(prefix, model_tag)
 
     # ============================================================
     # 训练循环
@@ -1273,7 +1312,7 @@ def train(args):
 
         if need_save:
             save_start = time.time()
-            save_checkpoint('periodic')
+            save_checkpoint('periodic', backup=(save_reason == 'time'))
             save_dur = time.time() - save_start
             print(f"  [保存] Checkpoint 已保存 (trigger={save_reason}, "
                   f"step={update_step}, games={total_games}, "

@@ -100,7 +100,7 @@ def validator():
     player1_win_second = 0
     player2_win_first = 0
     player2_win_second = 0
-    draw_count = 0
+    tie_count = 0
     
     # 统计总局数，以计算胜率
     first_player1_rounds = 0
@@ -153,7 +153,7 @@ def validator():
                 else:
                     player2_win_second += 1
             else:
-                draw_count += 1
+                tie_count += 1
             
             completed_rounds += 1
             
@@ -175,10 +175,10 @@ def validator():
                     win_rate_second = (player2_win_second / first_player1_rounds) * 100
                     print(f"  后手胜率: {win_rate_second:.2f}% ({player2_win_second}/{first_player1_rounds})")
                 
-                print(f"平局数: {draw_count}\n")
+                print(f"平局数: {tie_count}\n")
     
     print("\n===== 验证完成 =====")
-    total_rounds = player1_win_first + player1_win_second + player2_win_first + player2_win_second + draw_count
+    total_rounds = player1_win_first + player1_win_second + player2_win_first + player2_win_second + tie_count
     
     print(f"总场次: {total_rounds}")
     print(f"先手总局数 (Player1先手): {first_player1_rounds}")
@@ -200,7 +200,7 @@ def validator():
         win_rate_second = (player2_win_second / first_player1_rounds) * 100
         print(f"  后手胜率: {win_rate_second:.2f}% ({player2_win_second} / {first_player1_rounds})")
 
-    print(f"\n平局数: {draw_count}")
+    print(f"\n平局数: {tie_count}")
 
 if __name__ == "__main__":
     validator()

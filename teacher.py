@@ -370,7 +370,7 @@ def generate_distill_games(
 
         if verbose and (game_idx + 1) % 100 == 0:
             moves = len(game_steps)
-            w_str = {1: 'P1', 2: 'P2', 0: 'Draw'}[winner]
+            w_str = {1: 'P1', 2: 'P2', 0: 'Tie'}[winner]
             print(f"  [Distill] Game {game_idx + 1:>5}/{num_games}: "
                   f"moves={moves:>3}, winner={w_str:>4}, "
                   f"samples={len(all_data):>8}")

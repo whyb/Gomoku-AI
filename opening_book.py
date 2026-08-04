@@ -131,7 +131,7 @@ class OpeningBook:
 
             wins_first = 0
             wins_second = 0
-            draws = 0
+            ties = 0
 
             for game_idx in range(games_per_opening):
                 # 交替先后手
@@ -146,19 +146,19 @@ class OpeningBook:
                     if winner == 1:
                         wins_first += 1
                     elif winner == 0:
-                        draws += 1
+                        ties += 1
                 else:
                     if winner == 2:
                         wins_second += 1
                     elif winner == 0:
-                        draws += 1
+                        ties += 1
 
             total = games_per_opening
             results[name] = {
                 'desc': info['desc'],
                 'wins_as_first': wins_first,
                 'wins_as_second': wins_second,
-                'draws': draws,
+                'ties': ties,
                 'win_rate_first': wins_first / (total // 2),
                 'win_rate_second': wins_second / (total // 2),
                 'overall_win_rate': (wins_first + wins_second) / total,

@@ -21,7 +21,7 @@ class ModelRecord:
     games_played: int = 0
     wins: int = 0
     losses: int = 0
-    draws: int = 0
+    ties: int = 0
     created_at: float = field(default_factory=time.time)
     metadata: Dict = field(default_factory=dict)  # 额外信息 (board_size, step 等)
 
@@ -60,14 +60,14 @@ class EloRating:
         """A 对 B 的预期胜率"""
         return 1.0 / (1.0 + 10 ** ((rating_b - rating_a) / 400.0))
 
-    def update(self, winner_id: str, loser_id: str, draw: bool = False):
+    def update(self, winner_id: str, loser_id: str, tie: bool = False):
         """
         更新评分
 
         Args:
-            winner_id: 赢家模型 ID (draw 时无所谓)
+            winner_id: 赢家模型 ID (tie 时无所谓)
             loser_id: 输家模型 ID
-            draw: 是否平局
+            tie: 是否平局
         """
         self.add_model(winner_id)
         self.add_model(loser_id)
@@ -77,7 +77,7 @@ class EloRating:
         ea = self.expected_score(ra, rb)
         eb = self.expected_score(rb, ra)
 
-        if draw:
+        if tie:
             sa, sb = 0.5, 0.5
         else:
             sa, sb = 1.0, 0.0
@@ -88,9 +88,9 @@ class EloRating:
         # 更新统计
         self.ratings[winner_id].games_played += 1
         self.ratings[loser_id].games_played += 1
-        if draw:
-            self.ratings[winner_id].draws += 1
-            self.ratings[loser_id].draws += 1
+        if tie:
+            self.ratings[winner_id].ties += 1
+            self.ratings[loser_id].ties += 1
         else:
             self.ratings[winner_id].wins += 1
             self.ratings[loser_id].losses += 1
@@ -99,7 +99,7 @@ class EloRating:
         self.history.append({
             'winner': winner_id,
             'loser': loser_id,
-            'draw': draw,
+            'tie': tie,
             'winner_elo_after': self.ratings[winner_id].elo,
             'loser_elo_after': self.ratings[loser_id].elo,
             'timestamp': time.time()
@@ -148,16 +148,23 @@ class EloRating:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
     def load(self, filepath: str):
-        """从文件加载"""
+        """从文件加载 (兼容旧版存档中的 draws/draw 字段)"""
         with open(filepath, 'r', encoding='utf-8') as f:
             data = json.load(f)
         self.k_factor = data['k_factor']
         self.default_elo = data['default_elo']
-        self.ratings = {
-            mid: ModelRecord(**record)
-            for mid, record in data['ratings'].items()
-        }
+        records = {}
+        for mid, record in data['ratings'].items():
+            # 旧版存档字段名 draws → ties
+            if 'draws' in record and 'ties' not in record:
+                record['ties'] = record.pop('draws')
+            records[mid] = ModelRecord(**record)
+        self.ratings = records
         self.history = data.get('history', [])
+        # 旧版存档字段名 draw → tie
+        for h in self.history:
+            if 'draw' in h and 'tie' not in h:
+                h['tie'] = h.pop('draw')
 
 
 if __name__ == '__main__':
