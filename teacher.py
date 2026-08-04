@@ -329,9 +329,12 @@ def generate_distill_games(
             state[0] = (board == current_player).astype(np.float32)
             state[1] = (board == (3 - current_player)).astype(np.float32)
 
-            # 获取教师策略 (对当前局面)
-            policy = teacher.get_policy(board, current_player,
-                                        temperature=policy_temperature)
+            # 先手第一手完全均匀随机落子 (不固定天元); 第二手起用教师策略
+            if not board.any():
+                policy = np.full(total_cells, 1.0 / total_cells, dtype=np.float32)
+            else:
+                policy = teacher.get_policy(board, current_player,
+                                            temperature=policy_temperature)
 
             # 记录
             game_steps.append((state.copy(), policy, current_player))

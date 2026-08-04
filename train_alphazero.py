@@ -83,7 +83,7 @@ GAMMA = 1.0                    # 折扣因子 (AlphaZero 用 1.0, 不折扣)
 def backup_checkpoint_files(prefix: str, model_tag: str,
                             save_dir: str = 'pretrained_models') -> str:
     """
-    将当前目录下的 {prefix}_*.pth 权重备份一份到
+    将当前目录下的 {prefix}_*.pth 权重和 {prefix}_elo.json 备份一份到
     ./pretrained_models/{model_tag}/{当前时间}/ 目录
 
     例如: ./pretrained_models/standard/2026-08-03 17_46_59/
@@ -100,10 +100,12 @@ def backup_checkpoint_files(prefix: str, model_tag: str,
     backup_dir = os.path.join(save_dir, model_tag, timestamp)
     os.makedirs(backup_dir, exist_ok=True)
     copied = 0
-    for path in glob.glob(f'{prefix}_*.pth'):
-        shutil.copy2(path, os.path.join(backup_dir, os.path.basename(path)))
-        copied += 1
-    print(f"  备份权重 → {backup_dir} ({copied} 个 .pth 文件)")
+    for pattern in (f'{prefix}_*.pth', f'{prefix}_elo.json'):
+        for path in glob.glob(pattern):
+            if os.path.isfile(path):
+                shutil.copy2(path, os.path.join(backup_dir, os.path.basename(path)))
+                copied += 1
+    print(f"  备份权重 → {backup_dir} ({copied} 个文件)")
     return backup_dir
 
 

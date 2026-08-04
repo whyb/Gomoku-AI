@@ -116,9 +116,8 @@ def play_round(board_size, win_condition, model_state_dict,
         if target == 'teacher' and env.current_player == 2:
             # 教师执白落子
             if not env.board.any():
-                # 空棋盘教师无法评分, 按惯例落天元
-                center = board_size // 2
-                action = center * board_size + center
+                # 空棋盘教师无法评分, 先手第一手随机落子 (均匀分布)
+                action = np.random.randint(total_cells)
             else:
                 pos = teacher.get_move(env.board)
                 if pos is None:
@@ -131,9 +130,8 @@ def play_round(board_size, win_condition, model_state_dict,
         else:
             # 模型落子 (self 模式双方都是模型; teacher 模式模型执黑)
             if not env.board.any() and env.current_player == 1:
-                # 黑方第一手固定落天元 (与 self_play.py 规则一致)
-                center = board_size // 2
-                action = center * board_size + center
+                # 先手第一手随机落子 (均匀分布), 不固定天元
+                action = np.random.randint(total_cells)
             else:
                 with torch.no_grad():
                     logits, _ = model(state_tensor)
@@ -240,7 +238,7 @@ def validator():
     print(f"模型探索率 epsilon: {args.epsilon} (0=纯贪心, 结果确定)")
     if args.seed is not None:
         print(f"随机种子: {args.seed}")
-    print("黑方第一手固定落天元 (与 self_play.py 规则一致)。")
+    print("先手第一手随机落子 (均匀分布), 不固定天元。")
     print("===================\n")
 
     # 加载模型

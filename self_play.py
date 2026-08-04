@@ -134,12 +134,11 @@ class SelfPlayWorker:
             # 温度退火
             temperature = 1.0 if step < self.temp_threshold else 0.1
 
-            # 黑方(P1)第一步必须落子天元(正中心) — 标准五子棋/连珠规则
-            if not board.any() and current_player == 1:
-                center = self.board_size // 2
-                action = center * self.board_size + center
-                actions = [action]
-                probs = np.array([1.0])
+            # 先手第一手完全均匀随机落子 (不固定天元); 第二手起走 MCTS
+            if not board.any():
+                total_cells = self.board_size * self.board_size
+                actions = list(range(total_cells))
+                probs = np.full(total_cells, 1.0 / total_cells, dtype=np.float32)
             else:
                 # 规则短路：检查强制走法（立即获胜 / 必须防守）
                 forced_action, reason = get_forced_move(
@@ -509,12 +508,11 @@ class SelfPlayManager:
             state = self.worker._build_state(board, current_player)
             temperature = 1.0 if step < self.worker.temp_threshold else 0.1
 
-            # 黑方(P1)第一步必须落子天元(正中心) — 标准五子棋/连珠规则
-            if not board.any() and current_player == 1:
-                center = self.board_size // 2
-                action = center * self.board_size + center
-                actions = [action]
-                probs = np.array([1.0])
+            # 先手第一手完全均匀随机落子 (不固定天元); 第二手起走 MCTS
+            if not board.any():
+                total_cells = self.board_size * self.board_size
+                actions = list(range(total_cells))
+                probs = np.full(total_cells, 1.0 / total_cells, dtype=np.float32)
             else:
                 # 规则短路：检查强制走法
                 forced_action, reason = get_forced_move(
@@ -658,12 +656,11 @@ def _run_opponent_game(worker1, worker2, board_size, win_condition, game_id):
         state = worker1._build_state(board, current_player)
         temperature = 1.0 if step < worker1.temp_threshold else 0.1
 
-        # 黑方(P1)第一步必须落子天元(正中心) — 标准五子棋/连珠规则
-        if not board.any() and current_player == 1:
-            center = board_size // 2
-            action = center * board_size + center
-            actions = [action]
-            probs = np.array([1.0])
+        # 先手第一手完全均匀随机落子 (不固定天元); 第二手起走 MCTS
+        if not board.any():
+            total_cells = board_size * board_size
+            actions = list(range(total_cells))
+            probs = np.full(total_cells, 1.0 / total_cells, dtype=np.float32)
         else:
             # 规则短路：检查强制走法
             forced_action, reason = get_forced_move(

@@ -1,11 +1,16 @@
 """
-固定开局评估集 — 消除开局随机性，公平比较不同模型
+固定开局评估集 — 公平比较不同模型的续走表现
+
+规则说明:
+  先手(黑方)第一手已改为完全均匀随机落子 (不固定天元),
+  因此开局库不再指定第一手, 只定义随机首手之后的固定续走
+  (以首手位置为基准的相对偏移, 越界时自动镜像保持棋形)。
 
 用法:
-  每个开局指定前 N 步落子，然后两个模型从这个局面开始对弈
+  每个开局指定首手之后的 N 步续走, 模型从该局面开始对弈
   这样可以:
-  1. 消除开局随机性对评估的影响
-  2. 测试模型在不同开局下的表现
+  1. 让评估与训练规则一致 (先手均匀随机)
+  2. 测试模型在不同局部棋形下的表现
   3. 发现模型的薄弱开局
 """
 
@@ -16,59 +21,55 @@ from typing import List, Dict, Tuple, Optional
 class OpeningBook:
     """固定开局库"""
 
-    # 标准开局定义 (落子坐标列表, 交替黑白)
+    # 标准开局定义 — 只含随机首手之后的续走偏移 (以首手为基准, 交替黑白)
+    # 注意: 第一手(黑)完全均匀随机落子, 不再固定天元;
+    #       原 'center_*' 开局仅指定天元首手, 已随新规则移除
     STANDARD_OPENINGS = {
         # === 10x10 棋盘开局 ===
-        'center_10': {
-            'size': 10,
-            'moves': [(5, 5)],
-            'desc': '天元开局 (10×10)'
-        },
         'diagonal_10': {
             'size': 10,
-            'moves': [(5, 5), (6, 6)],
-            'desc': '对角开局 (10×10)'
+            'offsets': [(1, 1)],
+            'desc': '对角续走 (随机首手, 白方斜连)'
         },
         'parallel_10': {
             'size': 10,
-            'moves': [(5, 5), (5, 6)],
-            'desc': '平行开局 (10×10)'
+            'offsets': [(0, 1)],
+            'desc': '平行续走 (随机首手, 白方横连)'
         },
         'exchange_10': {
             'size': 10,
-            'moves': [(5, 5), (6, 6), (5, 6)],
-            'desc': '交换开局 (10×10)'
+            'offsets': [(1, 1), (0, 1)],
+            'desc': '交换续走 (随机首手, 白斜+黑横)'
         },
 
         # === 15x15 棋盘开局 ===
-        'center_15': {
-            'size': 15,
-            'moves': [(7, 7)],
-            'desc': '天元开局 (15×15)'
-        },
         'diagonal_15': {
             'size': 15,
-            'moves': [(7, 7), (8, 8)],
-            'desc': '对角开局 (15×15)'
+            'offsets': [(1, 1)],
+            'desc': '对角续走 (随机首手, 白方斜连)'
         },
         'parallel_15': {
             'size': 15,
-            'moves': [(7, 7), (7, 8)],
-            'desc': '平行开局 (15×15)'
+            'offsets': [(0, 1)],
+            'desc': '平行续走 (随机首手, 白方横连)'
         },
         'indirect_15': {
             'size': 15,
-            'moves': [(7, 7), (6, 8)],
-            'desc': '间接开局 (15×15)'
-        },
-
-        # === 5x5 棋盘开局 ===
-        'center_5': {
-            'size': 5,
-            'moves': [(2, 2)],
-            'desc': '天元开局 (5×5)'
+            'offsets': [(-1, 1)],
+            'desc': '间接续走 (随机首手, 白方斜连)'
         },
     }
+
+    @staticmethod
+    def _resolve_offset(fx: int, fy: int, dx: int, dy: int,
+                        n: int) -> Tuple[int, int]:
+        """相对偏移 → 绝对坐标; 越界时沿该轴镜像, 保持相对棋形"""
+        nx, ny = fx + dx, fy + dy
+        if nx < 0 or nx >= n:
+            nx = fx - dx
+        if ny < 0 or ny >= n:
+            ny = fy - dy
+        return nx, ny
 
     @staticmethod
     def get_opening(name: str) -> Dict:
@@ -84,22 +85,28 @@ class OpeningBook:
         }
 
     @staticmethod
-    def apply_opening(board: np.ndarray, moves: List[Tuple[int, int]]
+    def apply_opening(board: np.ndarray, offsets: List[Tuple[int, int]]
                       ) -> Tuple[np.ndarray, int]:
         """
-        将开局落子应用到棋盘上
+        从空棋盘开始: 先手(黑)第一手均匀随机, 再应用续走偏移
 
         Args:
             board: (H, W) 空棋盘
-            moves: 落子坐标列表 [(x, y), ...]
+            offsets: 以随机首手为基准的续走偏移列表 [(dx, dy), ...]
         Returns:
             board: 应用开局后的棋盘
             current_player: 下一步该谁走 (1 或 2)
         """
-        for i, (x, y) in enumerate(moves):
-            player = 1 if i % 2 == 0 else 2  # 黑先
+        n = board.shape[0]
+        first = np.random.randint(n * n)
+        fx, fy = first // n, first % n
+        board[fx, fy] = 1  # 黑方随机首手
+
+        for i, (dx, dy) in enumerate(offsets):
+            player = 2 if i % 2 == 0 else 1  # 续走: 白黑交替
+            x, y = OpeningBook._resolve_offset(fx, fy, dx, dy, n)
             board[x, y] = player
-        current_player = 1 if len(moves) % 2 == 0 else 2
+        current_player = 2 if len(offsets) % 2 == 0 else 1
         return board, current_player
 
     @staticmethod
@@ -137,7 +144,7 @@ class OpeningBook:
                 # 交替先后手
                 model_first = (game_idx % 2 == 0)
                 winner = OpeningManager._play_opening_game(
-                    board_size, info['moves'],
+                    board_size, info['offsets'],
                     model_fn if model_first else opponent_model_fn,
                     opponent_model_fn if model_first else model_fn
                 )
@@ -171,11 +178,11 @@ class OpeningManager:
     """开局管理器 — 执行开局对弈"""
 
     @staticmethod
-    def _play_opening_game(board_size: int, opening_moves: List[Tuple[int, int]],
+    def _play_opening_game(board_size: int, opening_offsets: List[Tuple[int, int]],
                            player1_fn, player2_fn,
                            max_steps: int = None) -> int:
         """
-        从开局开始一局对弈
+        从随机首手 + 固定续走开局开始一局对弈
 
         Returns:
             1 = player1 赢, 2 = player2 赢, 0 = 平局
@@ -185,13 +192,19 @@ class OpeningManager:
 
         board = np.zeros((board_size, board_size), dtype=np.int32)
 
-        # 应用开局
-        for i, (x, y) in enumerate(opening_moves):
-            player = 1 if i % 2 == 0 else 2
+        # 先手(黑)第一手完全均匀随机 (不固定天元)
+        first = np.random.randint(board_size * board_size)
+        fx, fy = first // board_size, first % board_size
+        board[fx, fy] = 1
+
+        # 应用续走偏移 (白方第二手起, 黑白交替)
+        for i, (dx, dy) in enumerate(opening_offsets):
+            player = 2 if i % 2 == 0 else 1
+            x, y = OpeningBook._resolve_offset(fx, fy, dx, dy, board_size)
             board[x, y] = player
 
-        current_player = 1 if len(opening_moves) % 2 == 0 else 2
-        step = len(opening_moves)
+        current_player = 2 if len(opening_offsets) % 2 == 0 else 1
+        step = 1 + len(opening_offsets)
 
         while step < max_steps:
             # 构建状态

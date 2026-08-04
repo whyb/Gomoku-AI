@@ -187,6 +187,9 @@ def get_candidate_mask(board: np.ndarray, radius: int = 2) -> np.ndarray:
     获取候选落子点掩码（bool 数组，flattened）。
     只考虑已有棋子周围 radius 格内的空点。
     空棋盘时返回中心 3x3 区域。
+
+    实现: 用 numpy 零填充 + 滑动窗口 OR (等价于方形膨胀) 向量化计算,
+    单次调用耗时与棋子数量无关 (原 Python 双层循环会随棋子数线性变慢)。
     """
     h, w = board.shape
     if not board.any():
@@ -199,14 +202,15 @@ def get_candidate_mask(board: np.ndarray, radius: int = 2) -> np.ndarray:
                     mask[nx, ny] = True
         return mask.reshape(-1)
 
+    # 方形半径膨胀: 零填充边界后滑动窗口 OR, 语义与原实现一致
+    occupied = (board != 0)
+    padded = np.pad(occupied, radius, mode='constant', constant_values=False)
     mask = np.zeros((h, w), dtype=bool)
-    occupied = np.argwhere(board != 0)
-    for x, y in occupied:
-        for dx in range(-radius, radius + 1):
-            for dy in range(-radius, radius + 1):
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < h and 0 <= ny < w and board[nx, ny] == 0:
-                    mask[nx, ny] = True
+    for dx in range(2 * radius + 1):
+        for dy in range(2 * radius + 1):
+            mask |= padded[dx:dx + h, dy:dy + w]
+    # 与原始语义一致: 只标记空点
+    mask &= (board == 0)
     return mask.reshape(-1)
 
 
@@ -476,6 +480,9 @@ class MCTS:
                     dirichlet_epsilon=self.dirichlet_epsilon)
 
         # 主搜索循环
+        # 按棋盘内容缓存 _get_valid_actions 结果: 不同路径可能到达相同盘面
+        # (同一棋子集合的不同落子顺序), 避免对同一盘面重复计算掩码
+        valid_cache: Dict[bytes, np.ndarray] = {}
         for sim in range(self.num_simulations):
             node = root
             sim_board = board.copy()
@@ -521,7 +528,11 @@ class MCTS:
                         if policy[action] < policy.max() + 1.0:
                             policy[action] = max(policy[action], policy.max() + 1.0)
 
-                valid = self._get_valid_actions(sim_board)
+                board_key = sim_board.tobytes()
+                valid = valid_cache.get(board_key)
+                if valid is None:
+                    valid = self._get_valid_actions(sim_board)
+                    valid_cache[board_key] = valid
                 if valid.any():
                     node.expand(policy, valid, current_player)
                 value_for_backup = value
@@ -658,6 +669,9 @@ class BatchMCTS:
                     dirichlet_epsilon=self.dirichlet_epsilon)
 
         sim_count = 0
+        # 同一批模拟会反复选中同一叶子 (相同 sim_board), 掩码计算昂贵,
+        # 按棋盘内容缓存 _get_valid_actions 结果, 每个唯一盘面只算一次
+        valid_cache: Dict[bytes, np.ndarray] = {}
         while sim_count < self.num_simulations:
             # 收集一批叶子节点
             batch_leaves = []
@@ -727,7 +741,11 @@ class BatchMCTS:
                             if policy[action] < policy.max() + 1.0:
                                 policy[action] = max(policy[action], policy.max() + 1.0)
 
-                    valid = self._get_valid_actions(sim_board)
+                    board_key = sim_board.tobytes()
+                    valid = valid_cache.get(board_key)
+                    if valid is None:
+                        valid = self._get_valid_actions(sim_board)
+                        valid_cache[board_key] = valid
                     if valid.any():
                         node.expand(policy, valid, cp)
                     node.backup(value)

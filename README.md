@@ -101,13 +101,13 @@ python train_alphazero.py --board_size 15 --num_simulations 400 --model small --
 
 ```
 阶段 1: 蒸馏 (--distill)              阶段 2: MCTS 微调 (正常训练)
-┌──────────────────────┐              ┌──────────────────────┐
-│ 教师 AI (Kali-Hac)    │  加载权重    │ MCTS + 自博弈         │
-│   ↓ 自我对弈          │ ──────────→  │   ↓                  │
+┌───────────────────────┐              ┌──────────────────────┐
+│ 教师 AI (Kali-Hac)    │  加载权重     │ MCTS + 自博弈         │
+│   ↓ 自我对弈           │ ──────────→  │   ↓                  │
 │ (state, π_teacher, z) │  自动衔接     │ 强化学习微调          │
 │   ↓                   │              │   ↓                  │
-│ KL 散度 + MSE 训练    │              │ 超越教师             │
-└──────────────────────┘              └──────────────────────┘
+│ KL 散度 + MSE 训练     │              │ 超越教师             │
+└───────────────────────┘              └──────────────────────┘
 ```
 
 #### 阶段 1：知识蒸馏 — 快速模仿大师
@@ -130,12 +130,10 @@ python train_alphazero.py --board_size 15 --num_simulations 400 --model small --
 
 ```shell
 # 第一阶段：蒸馏（15×15，2 万局，约 1-3 小时）
-python train_alphazero.py --board_size 15 --model standard \
-    --distill --distill_games 20000
+python train_alphazero.py --board_size 15 --model standard --distill --distill_games 20000
 
 # 第二阶段：MCTS 微调（自动加载蒸馏权重）
-python train_alphazero.py --board_size 15 --model standard \
-    --num_simulations 400
+python train_alphazero.py --board_size 15 --model standard --num_simulations 400
 ```
 
 #### 为什么需要两阶段？
@@ -307,10 +305,57 @@ O X X . .
 . . . . . . . .
 ```
 
+更多基础知识详见： [五子棋术语](https://baike.baidu.com/item/%E4%BA%94%E5%AD%90%E6%A3%8B%E6%9C%AF%E8%AF%AD/11009079)
+
+
+### 模型验证（val_az.py）
+
+对已训练的 AlphaZero 模型进行验证，使用 `val_az.py`。输出两行核心结论：始终只报**验证模型**的胜率与平局率（按先手/后手分组），自对弈模式下显示为"验证模型1/验证模型2"。
+
+```shell
+# 模型自对弈（默认 target=self，P1/P2 均为同一模型）
+python val_az.py --board_size 15 --model standard --model_path alpaz_standard_15x15_best.pth --target self
+
+# 与 Kali-Hac 教师对弈（验证模型执黑=P1，教师执白=P2）
+python val_az.py --board_size 15 --model standard --model_path alpaz_standard_15x15_best.pth --target teacher
+```
+
+常用参数：
+
+- `--target self|teacher`：自对弈（默认）或与教师对弈
+- `--model small|standard`：模型大小，需与训练时一致
+- `--model_path`：支持纯权重（`*_model.pth`、`*_best.pth`、`*_distill.pth`）和完整 checkpoint（自动识别其中的 `model_state_dict`）
+- `--total_rounds`：验证局数（默认 200）
+- `--epsilon`：模型落子随机探索率，默认 0（纯贪心，评估推荐）
+- `--seed N`：固定随机种子，结果可完全复现
+
 
 ### 模型架构与输入输出
 
-本项目中的 AI 模型 `GomokuNetV3` 采用了融合 **残差网络 (ResNet)** 和 **Transformer** 的混合架构，旨在同时捕捉棋盘的局部特征和全局依赖关系。
+本项目推荐使用的 AI 模型是 AlphaZero 风格的双头网络 `GomokuNetAlphaZero`（标准版）和 `GomokuNetAlphaZeroSmall`（小模型，快速实验）。**两者都是残差模型**，具体为 **SE-ResNet（Squeeze-Excitation Residual Network）**：每个残差块由两层 3×3 卷积 + 批归一化 + SE 通道注意力组成，并通过 `out + residual` 残差（跳跃）连接叠加。与老版 `GomokuNetV3` 不同，新版**不使用 Transformer**，而是纯卷积结构，全卷积 + 全局平均池化使其原生支持任意棋盘大小。
+
+| 模型 | 通道数 | SE 残差块数 | 参数量 | 适用场景 |
+|------|--------|-------------|--------|----------|
+| GomokuNetAlphaZeroSmall | 64 | 6 | ~460K | 快速实验、小棋盘 |
+| GomokuNetAlphaZero | 128 | 10 | ~3M | 正式训练、大棋盘 |
+
+网络结构：
+
+```
+输入 (B, 2, H, W)
+  ↓
+Stem: Conv3×3(2→C) → BN → ReLU
+  ↓
+Body: N × SEResBlock(Conv3×3→BN→ReLU→Conv3×3→BN→SE→残差相加→ReLU)
+  ↓
+┌────────────────┬────────────────┐
+│ Policy Head    │ Value Head     │
+│ Conv1×1→32     │ Conv1×1→32     │
+│ BN → ReLU      │ BN → ReLU      │
+│ Conv1×1→1      │ AvgPool → FC   │
+│ → (B, H×W)     │ → (B, 1)       │
+└────────────────┴────────────────┘
+```
 
 模型的输入和输出设计如下：
 
@@ -319,10 +364,10 @@ O X X . .
 -   **含义**: 模型的输入是当前五子棋局面的表示。为了让模型能区分不同玩家的棋子，我们使用多通道表示方法。
 -   **形状 (Shape)**: `(batch_size, 2, board_size, board_size)`
     -   **`batch_size`**: 表示一次性处理的棋局数量。通常在训练时大于1，预测时为1。
-    -   **`2`**: 输入的通道数。
-        -   **通道 0**: 玩家1（当前落子方）的棋盘状态。如果该位置有玩家1的棋子，值为1，否则为0。
-        -   **通道 1**: 玩家2（对手方）的棋盘状态。如果该位置有玩家2的棋子，值为1，否则为0。
-    -   **`board_size`**: 棋盘的边长。例如，对于5x5的棋盘，`board_size` 为5。
+    -   **`2`**: 输入的通道数，采用**当前玩家视角**（视角对称，同一套权重对执黑/执白通用）。
+        -   **通道 0**: 当前落子方棋子的棋盘状态。该位置有当前方棋子为1，否则为0。
+        -   **通道 1**: 对手方棋子的棋盘状态。该位置有对手棋子为1，否则为0。
+    -   **`board_size`**: 棋盘的边长。模型全卷积、无固定尺寸层，支持任意棋盘大小（例如5x5的棋盘，`board_size` 为5）。
 
 ---
 
@@ -343,18 +388,20 @@ O X X . .
 -   **作用**: 价值头用来评估当前棋盘局面的优劣。如果这个值接近1，表明模型认为当前玩家有很高的胜率；如果接近-1，表明模型认为对手有很高的胜率；如果接近0，则局面可能处于均势。
 -   **形状 (Shape)**: `(batch_size)`
     -   **`batch_size`**: 与输入一致。每个棋局会对应一个价值预测。
+    -   **视角**: 从**当前落子方**的视角评估（价值输出形状为 `(batch_size,)`，代码中经 `squeeze(-1)` 去掉尾部维度）。
 -   **值范围**: 经过 `Tanh` 激活函数处理，因此其值范围被限制在 **$[-1, 1]$** 之间。
-    -   **$1$**: 绝对胜利。
-    -   **$-1$**: 绝对失败。
+    -   **$1$**: 当前方绝对胜利。
+    -   **$-1$**: 当前方绝对失败。
     -   **$0$**: 局面均势。
 
-通过这两个输出，模型可以同时进行**决策 (policy)** 和**局面评估 (value)**，参考的是 AlphaGo 等深度强化学习模型中非常经典的架构。
+通过策略头和价值头两个输出，模型可以同时进行**决策 (policy)** 和**局面评估 (value)**，参考的是 AlphaGo / AlphaZero 等深度强化学习模型中非常经典的双头架构。
 
 ### 使用GPU
 
 代码会通过 PyTorch 自动检测并使用可用的 GPU，无需手动配置：
 
 * 若系统存在兼容的 NVIDIA GPU 且安装了对应 CUDA 版本，会自动启用 GPU 加速
+* 如果是AMD GPU也可以使用ROCm版的Pytorch，代码不用修改一行
 * 若无 GPU，会自动 fallback 到 CPU 模式运行
 
 
@@ -372,9 +419,7 @@ O X X . .
 python export_onnx.py gobang_best_model.pth --board_size 8 --win_condition 5
 
 # 自定义输出路径
-python export_onnx.py gobang_best_model.pth \
-  --board_size 8 --win_condition 5 \
-  --onnx_path ./webdemo/model_bs8_win5.onnx
+python export_onnx.py gobang_best_model.pth --board_size 8 --win_condition 5 --onnx_path ./webdemo/model_bs8_win5.onnx
 ```
 
 </details>
@@ -390,9 +435,7 @@ python export_onnx.py gobang_best_model.pth \
 python export_onnx_dy.py gobang_best_model_dy.pth --board_size 15 --win_condition 5
 
 # 自定义输出路径
-python export_onnx_dy.py gobang_best_model_dy.pth \
-  --board_size 15 \
-  --onnx_path ./webdemo/model_bs15_win5.onnx
+python export_onnx_dy.py gobang_best_model_dy.pth --board_size 15 --onnx_path ./webdemo/model_bs15_win5.onnx
 ```
 
 </details>

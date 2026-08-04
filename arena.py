@@ -13,7 +13,7 @@ Arena — 模型对战评估系统
 import numpy as np
 import torch
 import torch.nn as nn
-from typing import Callable, Optional, Tuple, Dict, List
+from typing import Callable, Optional, Dict
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import time
 
@@ -29,31 +29,38 @@ class Arena:
         self.win_condition = win_condition
 
     def play_game(self, player1_fn: Callable, player2_fn: Callable,
-                  opening_moves: Optional[List[Tuple[int, int]]] = None,
+                  opening: Optional[Dict] = None,
                   temperature: float = 0.3) -> int:
         """
-        对弈一局
+        对弈一局 — 先手(黑方)第一手完全均匀随机落子 (不固定天元)
 
         Args:
             player1_fn: player1 的动作选择函数 (state) → (actions, probs)
             player2_fn: player2 的动作选择函数
-            opening_moves: 可选的开局落子
+            opening: 可选开局条目 (OpeningBook 条目, 含 'offsets');
+                     只定义随机首手之后的固定续走, 不含第一手
             temperature: 温度参数
         Returns:
             1 = player1 赢, 2 = player2 赢, 0 = 平局
         """
-        board = np.zeros((self.board_size, self.board_size), dtype=np.int32)
+        n = self.board_size
+        board = np.zeros((n, n), dtype=np.int32)
 
-        # 应用开局
-        start_step = 0
-        if opening_moves:
-            for i, (x, y) in enumerate(opening_moves):
-                player = 1 if i % 2 == 0 else 2
-                board[x, y] = player
-            start_step = len(opening_moves)
+        # 先手(黑)第一手完全均匀随机落子 (不固定天元)
+        first = np.random.randint(n * n)
+        fx, fy = first // n, first % n
+        board[fx, fy] = 1
 
-        current_player = 1 if start_step % 2 == 0 else 2
-        max_steps = self.board_size * self.board_size
+        # 应用固定续走 (白方第二手起, 黑白交替)
+        offsets = opening.get('offsets', []) if opening else []
+        for i, (dx, dy) in enumerate(offsets):
+            player = 2 if i % 2 == 0 else 1
+            x, y = OpeningBook._resolve_offset(fx, fy, dx, dy, n)
+            board[x, y] = player
+
+        start_step = 1 + len(offsets)
+        current_player = 2 if len(offsets) % 2 == 0 else 1
+        max_steps = n * n
 
         for step in range(start_step, max_steps):
             # 构建状态
@@ -98,7 +105,7 @@ class Arena:
             player1_fn: player1 动作函数
             player2_fn: player2 动作函数
             num_games: 总对局数
-            use_openings: 是否使用固定开局
+            use_openings: 是否使用固定续走开局 (首手始终均匀随机)
             temperature: 温度参数
         Returns:
             统计结果字典
@@ -118,7 +125,7 @@ class Arena:
             # 选择开局
             opening = None
             if openings:
-                opening = openings[game_idx % len(openings)]['moves']
+                opening = openings[game_idx % len(openings)]
 
             # 交替先后手
             if game_idx % 2 == 0:
