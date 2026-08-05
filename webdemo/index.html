@@ -32,10 +32,8 @@
             }
             .grid-container {
                 @apply absolute inset-0;
-                padding: 3.3333%; 
                 display: grid;
-                grid-template-columns: repeat(14, 1fr);
-                grid-template-rows: repeat(14, 1fr);
+                padding: 3.3333%;
             }
             .grid-cell { @apply border-l border-t border-line; }
             .grid-cell-right { @apply border-r border-line; }
@@ -51,6 +49,34 @@
             .intersect-point {
                 @apply flex items-center justify-center cursor-pointer relative;
                 -webkit-tap-highlight-color: transparent;
+            }
+
+            .hover-corners { @apply absolute inset-0 z-[5] pointer-events-none; }
+            .hover-corner {
+                @apply absolute w-[7px] h-[7px] border-white;
+                box-shadow: 0 0 2px rgba(0,0,0,0.35);
+            }
+            .hover-corner-tl { @apply top-[-2px] left-[-2px] border-t-2 border-l-2 rounded-tl-[2px]; }
+            .hover-corner-tr { @apply top-[-2px] right-[-2px] border-t-2 border-r-2 rounded-tr-[2px]; }
+            .hover-corner-bl { @apply bottom-[-2px] left-[-2px] border-b-2 border-l-2 rounded-bl-[2px]; }
+            .hover-corner-br { @apply bottom-[-2px] right-[-2px] border-b-2 border-r-2 rounded-br-[2px]; }
+
+            .hint-overlay {
+                @apply absolute inset-0 z-[5] pointer-events-none;
+                display: grid;
+                opacity: 0;
+                transition: opacity 0.25s ease;
+            }
+            .hint-overlay.show { @apply opacity-100; }
+            .hint-cell {
+                @apply flex items-center justify-center;
+            }
+            .hint-square {
+                @apply rounded-[3px];
+                width: 34%;
+                height: 34%;
+                box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+                border: 1px solid rgba(255, 255, 255, 0.35);
             }
 
             .piece {
@@ -102,11 +128,34 @@
                 </div>
             </div>
             <div class="flex items-center gap-3">
+                <label class="flex items-center gap-1.5">
+                    <span class="text-[11px] font-medium">棋盘大小</span>
+                    <select id="boardSize" class="bg-white/70 border border-gray-300 rounded-md text-[11px] px-1.5 py-1 focus:ring-secondary focus:border-secondary">
+                        <option value="5">5</option>
+                        <option value="6">6</option>
+                        <option value="7">7</option>
+                        <option value="8">8</option>
+                        <option value="9">9</option>
+                        <option value="10">10</option>
+                        <option value="11">11</option>
+                        <option value="12">12</option>
+                        <option value="13">13</option>
+                        <option value="14">14</option>
+                        <option value="15" selected>15</option>
+                    </select>
+                </label>
                 <label class="flex items-center cursor-pointer gap-2">
                     <input type="checkbox" id="aiFirst" class="w-4 h-4 rounded border-gray-300 text-secondary focus:ring-secondary" checked>
                     <span class="text-[11px] font-medium">AI先手</span>
                 </label>
+                <label class="flex items-center cursor-pointer gap-2">
+                    <input type="checkbox" id="hintEnabled" class="w-4 h-4 rounded border-gray-300 text-secondary focus:ring-secondary">
+                    <span class="text-[11px] font-medium">落子提示</span>
+                </label>
                 <div class="h-4 w-px bg-gray-300 mx-1"></div>
+                <button id="undo" class="bg-amber-100 text-amber-800 border border-amber-500 text-[11px] px-3 py-1.5 rounded-lg hover:bg-amber-500 hover:text-white transition-colors shadow-sm">
+                    悔棋
+                </button>
                 <button id="restart" class="bg-primary text-white text-[11px] px-3 py-1.5 rounded-lg hover:bg-secondary transition-colors shadow-sm">
                     重置游戏
                 </button>
@@ -149,15 +198,18 @@
     </div>
 
     <script>
-        const BOARD_SIZE = 15;
-        const BOARD_SQUARE = BOARD_SIZE * BOARD_SIZE;
+        let boardSize = 15;
+        let boardSquare = boardSize * boardSize;
+        let aiTimer = null;   // AI 思考定时器 (悔棋/重置时取消)
+        let aiEpoch = 0;      // 悔棋/重置计数, 使进行中的 AI 推理失效
         
         let gameState = {
-            board: Array(BOARD_SQUARE).fill(0),
+            board: Array(boardSquare).fill(0),
             gameOver: false,
             model: null,
             isAIMoving: false,
             lastMove: -1,
+            moveHistory: [],  // 落子历史 [{index, player}], 用于悔棋
             humanPlayer: 1,    // 默认人类执黑(先手), AI执白(后手)
             aiPlayer: 2
         };
@@ -165,11 +217,16 @@
         function drawGrid() {
             const gridContainer = document.getElementById('grid-bg');
             gridContainer.innerHTML = '';
-            for (let i = 0; i < 14 * 14; i++) {
+            const n = boardSize - 1;
+            // 让格子线网格与落子点网格(交互层)严格对齐: padding = 100 / (2 * boardSize) %
+            gridContainer.style.padding = `${100 / (2 * boardSize)}%`;
+            gridContainer.style.gridTemplateColumns = `repeat(${n}, 1fr)`;
+            gridContainer.style.gridTemplateRows = `repeat(${n}, 1fr)`;
+            for (let i = 0; i < n * n; i++) {
                 const cell = document.createElement('div');
                 cell.className = 'grid-cell';
-                if ((i + 1) % 14 === 0) cell.classList.add('grid-cell-right');
-                if (i >= 14 * 13) cell.classList.add('grid-cell-bottom');
+                if ((i + 1) % n === 0) cell.classList.add('grid-cell-right');
+                if (i >= n * (n - 1)) cell.classList.add('grid-cell-bottom');
                 gridContainer.appendChild(cell);
             }
         }
@@ -177,61 +234,198 @@
         function initInteractions() {
             const board = document.getElementById('board');
             board.innerHTML = '';
-            for (let i = 0; i < BOARD_SQUARE; i++) {
+            board.style.gridTemplateColumns = `repeat(${boardSize}, 1fr)`;
+            board.style.gridTemplateRows = `repeat(${boardSize}, 1fr)`;
+            let overlay = document.getElementById('hintOverlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'hintOverlay';
+                overlay.className = 'hint-overlay';
+                board.appendChild(overlay);
+            }
+            overlay.style.gridTemplateColumns = `repeat(${boardSize}, 1fr)`;
+            overlay.style.gridTemplateRows = `repeat(${boardSize}, 1fr)`;
+            for (let i = 0; i < boardSquare; i++) {
                 const point = document.createElement('div');
                 point.className = 'intersect-point';
                 point.onclick = () => handleMove(i);
+                point.addEventListener('mouseover', () => showHoverCorners(i));
+                point.addEventListener('mouseout', clearHoverCorners);
                 board.appendChild(point);
             }
+        }
+
+        function showHoverCorners(index) {
+            clearHoverCorners();
+            if (gameState.gameOver || gameState.isAIMoving) return;
+            if (gameState.board[index] !== 0) return;
+
+            const point = document.getElementById('board').children[index + 1];
+            if (!point) return;
+            const corners = document.createElement('div');
+            corners.className = 'hover-corners';
+            corners.innerHTML =
+                '<span class="hover-corner hover-corner-tl"></span>' +
+                '<span class="hover-corner hover-corner-tr"></span>' +
+                '<span class="hover-corner hover-corner-bl"></span>' +
+                '<span class="hover-corner hover-corner-br"></span>';
+            point.appendChild(corners);
+        }
+
+        function clearHoverCorners() {
+            const el = document.querySelector('.hover-corners');
+            if (el) el.remove();
+        }
+
+        // 落子提示: 以玩家视角推理, policy logits 经 softmax 归一化后映射为浅绿~墨绿
+        let hintRunning = false;
+        function computeHints() {
+            if (!document.getElementById('hintEnabled').checked) return;
+            if (gameState.gameOver || gameState.isAIMoving) return;
+            if (!gameState.model) return;
+            if (hintRunning) return;
+
+            hintRunning = true;
+            (async () => {
+                const myEpoch = aiEpoch;
+                try {
+                    const input = new Float32Array(boardSquare * 2).fill(0);
+                    gameState.board.forEach((val, i) => {
+                        if (val === gameState.humanPlayer) input[i] = 1;
+                        if (val === gameState.aiPlayer) input[i + boardSquare] = 1;
+                    });
+                    const tensor = new ort.Tensor('float32', input, [1, 2, boardSize, boardSize]);
+                    const output = await gameState.model.run({ input: tensor });
+                    if (myEpoch !== aiEpoch || gameState.gameOver || gameState.isAIMoving) return;
+
+                    const logits = output.policy_logits.data;
+                    // 只对空位做 softmax, 保留 policy logits 的相对优势
+                    let maxLogit = -Infinity;
+                    for (let i = 0; i < boardSquare; i++) {
+                        if (gameState.board[i] === 0 && logits[i] > maxLogit) maxLogit = logits[i];
+                    }
+                    const probs = new Float32Array(boardSquare);
+                    if (maxLogit !== -Infinity) {
+                        let sum = 0;
+                        for (let i = 0; i < boardSquare; i++) {
+                            if (gameState.board[i] === 0) {
+                                probs[i] = Math.exp(logits[i] - maxLogit);
+                                sum += probs[i];
+                            }
+                        }
+                        for (let i = 0; i < boardSquare; i++) {
+                            probs[i] = sum > 0 ? probs[i] / sum : 0;
+                        }
+                    }
+                    renderHints(probs);
+                } catch (e) {
+                    console.error('落子提示推理失败:', e);
+                } finally {
+                    hintRunning = false;
+                }
+            })();
+        }
+
+        // 提示配色: 概率低淡黄绿 -> 概率高墨绿
+        const HINT_COLOR_LO = [240, 232, 140];   // 淡黄绿
+        const HINT_COLOR_HI = [20, 85, 40];      // 墨绿
+        function hintColor(v) {
+            const t = Math.max(0, Math.min(1, v));
+            const r = Math.round(HINT_COLOR_LO[0] + (HINT_COLOR_HI[0] - HINT_COLOR_LO[0]) * t);
+            const g = Math.round(HINT_COLOR_LO[1] + (HINT_COLOR_HI[1] - HINT_COLOR_LO[1]) * t);
+            const b = Math.round(HINT_COLOR_LO[2] + (HINT_COLOR_HI[2] - HINT_COLOR_LO[2]) * t);
+            return `rgb(${r}, ${g}, ${b})`;
+        }
+
+        function renderHints(probs) {
+            const overlay = document.getElementById('hintOverlay');
+            if (!overlay) return;
+            overlay.style.gridTemplateColumns = `repeat(${boardSize}, 1fr)`;
+            overlay.style.gridTemplateRows = `repeat(${boardSize}, 1fr)`;
+            overlay.innerHTML = '';
+            let maxProb = 0;
+            for (let i = 0; i < boardSquare; i++) {
+                if (probs[i] > maxProb) maxProb = probs[i];
+            }
+            if (maxProb <= 0) return;
+            for (let i = 0; i < boardSquare; i++) {
+                const cell = document.createElement('div');
+                cell.className = 'hint-cell';
+                // 相对优势: 概率越接近最佳手越深, 低于 1.5% 的弱手不显示
+                const v = probs[i] / maxProb;
+                if (gameState.board[i] === 0 && v >= 0.015) {
+                    const square = document.createElement('div');
+                    square.className = 'hint-square';
+                    square.style.backgroundColor = hintColor(v);
+                    cell.appendChild(square);
+                }
+                overlay.appendChild(cell);
+            }
+            overlay.classList.add('show');
+        }
+
+        function clearHints() {
+            const overlay = document.getElementById('hintOverlay');
+            if (overlay) overlay.classList.remove('show');
         }
 
         function handleMove(index) {
             if (gameState.gameOver || gameState.board[index] !== 0 || gameState.isAIMoving) return;
 
             placePiece(index, gameState.humanPlayer);
+            clearHints();
             if (checkGameOver(gameState.humanPlayer)) return;
 
             gameState.isAIMoving = true;
             document.getElementById('status').innerText = 'AI 正在思考...';
-            setTimeout(aiLogic, 1);
+            aiTimer = setTimeout(aiLogic, 1);
         }
 
         function placePiece(index, player) {
             gameState.board[index] = player;
             gameState.lastMove = index;
+            gameState.moveHistory.push({ index, player });
             
             const points = document.getElementById('board').children;
-            document.querySelectorAll('.last-move-cursor').forEach(el => el.remove());
-            
             const piece = document.createElement('div');
             piece.className = `piece ${player === 1 ? 'piece-black' : 'piece-white'}`;
-            points[index].appendChild(piece);
-            
-            const marker = document.createElement('div');
-            marker.className = 'last-move-cursor';
-            points[index].appendChild(marker);
+            points[index + 1].appendChild(piece);
+
+            markLastMove(index);
             
             requestAnimationFrame(() => piece.classList.add('piece-visible'));
         }
 
+        function markLastMove(index) {
+            document.querySelectorAll('.last-move-cursor').forEach(el => el.remove());
+            if (index < 0) return;
+            const points = document.getElementById('board').children;
+            const marker = document.createElement('div');
+            marker.className = 'last-move-cursor';
+            points[index + 1].appendChild(marker);
+        }
+
         async function aiLogic() {
             try {
+                const myEpoch = aiEpoch;
                 let bestMove = -1;
                 // AI 先手(执黑)时：棋盘为空，第一步必须落子天元(正中心)
                 if (gameState.board.filter(x => x!==0).length === 0) {
-                    const center = Math.floor(BOARD_SIZE / 2);
-                    bestMove = center * BOARD_SIZE + center;
+                    const center = Math.floor(boardSize / 2);
+                    bestMove = center * boardSize + center;
                 } else {
-                    const input = new Float32Array(BOARD_SQUARE * 2).fill(0);
+                    const input = new Float32Array(boardSquare * 2).fill(0);
+                    // 模型输入为当前玩家视角: channel0=当前玩家(AI)棋子, channel1=对手(人类)棋子
                     gameState.board.forEach((val, i) => {
-                        if (val === 1) input[i] = 1;
-                        if (val === 2) input[i + BOARD_SQUARE] = 1;
+                        if (val === gameState.aiPlayer) input[i] = 1;
+                        if (val === gameState.humanPlayer) input[i + boardSquare] = 1;
                     });
-                    const tensor = new ort.Tensor('float32', input, [1, 2, BOARD_SIZE, BOARD_SIZE]);
+                    const tensor = new ort.Tensor('float32', input, [1, 2, boardSize, boardSize]);
                     const output = await gameState.model.run({ input: tensor });
+                    if (myEpoch !== aiEpoch || gameState.gameOver) return;  // 已被悔棋/重置
                     const logits = output.policy_logits.data;
                     let maxVal = -Infinity;
-                    for (let i = 0; i < BOARD_SQUARE; i++) {
+                    for (let i = 0; i < boardSquare; i++) {
                         if (gameState.board[i] === 0 && logits[i] > maxVal) {
                             maxVal = logits[i];
                             bestMove = i;
@@ -242,11 +436,64 @@
                 if (!checkGameOver(gameState.aiPlayer)) {
                     document.getElementById('status').innerText = '请落子...';
                     gameState.isAIMoving = false;
+                    computeHints();
                 }
             } catch (e) {
                 console.error(e);
                 document.getElementById('status').innerText = 'AI 引擎异常';
             }
+        }
+
+        function popMove() {
+            const m = gameState.moveHistory.pop();
+            gameState.board[m.index] = 0;
+            // 清除该格子的棋子与标记 (仅含 piece + last-move-cursor)
+            document.getElementById('board').children[m.index + 1].innerHTML = '';
+            const prev = gameState.moveHistory.length
+                ? gameState.moveHistory[gameState.moveHistory.length - 1] : null;
+            gameState.lastMove = prev ? prev.index : -1;
+            return m;
+        }
+
+        function undo() {
+            if (gameState.moveHistory.length === 0) return;
+            // 使进行中的 AI 推理失效并取消未开始的落子
+            aiEpoch++;
+            if (aiTimer) { clearTimeout(aiTimer); aiTimer = null; }
+
+            const popped = popMove();
+            // 若撤销的是 AI 应手, 连玩家的落子一起撤销 (一整轮)
+            if (popped.player === gameState.aiPlayer &&
+                gameState.moveHistory.length > 0 &&
+                gameState.moveHistory[gameState.moveHistory.length - 1].player === gameState.humanPlayer) {
+                popMove();
+            }
+
+            gameState.gameOver = false;
+            document.getElementById('resultModal').classList.add('hidden');
+            document.getElementById('status').classList.add('animate-pulse');
+            markLastMove(gameState.lastMove);
+
+            // 悔棋到空棋盘 = 回到初始状态
+            if (gameState.board.every(x => x === 0)) {
+                if (gameState.aiPlayer === 1) {
+                    // AI 先手: 重新触发 AI 开局落天元
+                    gameState.isAIMoving = true;
+                    document.getElementById('status').innerText = 'AI 思考开局...';
+                    aiTimer = setTimeout(aiLogic, 1);
+                } else {
+                    gameState.isAIMoving = false;
+                    document.getElementById('status').innerText = '执黑先行';
+                    computeHints();
+                }
+                return;
+            }
+
+            // 正常悔棋后轮到玩家落子
+            gameState.isAIMoving = false;
+            document.getElementById('status').innerText =
+                gameState.humanPlayer === 1 ? '执黑先行' : '请落子...';
+            computeHints();
         }
 
         function checkGameOver(player) {
@@ -255,6 +502,7 @@
 
             if (isWin || isDraw) {
                 gameState.gameOver = true;
+                clearHints();
                 const isHumanWin = isWin && player === gameState.humanPlayer;
                 document.getElementById('status').innerText = isWin ? (isHumanWin ? '你赢了！' : 'AI 获胜') : '平局';
                 document.getElementById('status').classList.remove('animate-pulse');
@@ -284,14 +532,14 @@
         function checkWinner(p) {
             const b = gameState.board;
             const dirs = [[0,1], [1,0], [1,1], [1,-1]];
-            for (let i = 0; i < BOARD_SQUARE; i++) {
+            for (let i = 0; i < boardSquare; i++) {
                 if (b[i] !== p) continue;
-                const r = Math.floor(i / 15), c = i % 15;
+                const r = Math.floor(i / boardSize), c = i % boardSize;
                 for (const [dr, dc] of dirs) {
                     let count = 1;
                     for (let s = 1; s < 5; s++) {
                         const nr = r + dr*s, nc = c + dc*s;
-                        if (nr >= 0 && nr < 15 && nc >= 0 && nc < 15 && b[nr*15+nc] === p) count++;
+                        if (nr >= 0 && nr < boardSize && nc >= 0 && nc < boardSize && b[nr*boardSize+nc] === p) count++;
                         else break;
                     }
                     if (count >= 5) return true;
@@ -386,10 +634,16 @@
         }
 
         function reset() {
-            gameState.board = Array(BOARD_SQUARE).fill(0);
+            aiEpoch++;
+            if (aiTimer) { clearTimeout(aiTimer); aiTimer = null; }
+            clearHints();
+            boardSize = parseInt(document.getElementById('boardSize').value, 10) || 15;
+            boardSquare = boardSize * boardSize;
+            gameState.board = Array(boardSquare).fill(0);
             gameState.gameOver = false;
             gameState.isAIMoving = false;
             gameState.lastMove = -1;
+            gameState.moveHistory = [];
 
             const aiFirst = document.getElementById('aiFirst').checked;
             if (aiFirst) {
@@ -403,20 +657,31 @@
 
             document.getElementById('resultModal').classList.add('hidden');
             document.getElementById('status').classList.add('animate-pulse');
+            drawGrid();
             initInteractions();
 
             if (aiFirst) {
                 gameState.isAIMoving = true;
                 document.getElementById('status').innerText = 'AI 思考开局...';
-                setTimeout(aiLogic, 1);
+                aiTimer = setTimeout(aiLogic, 1);
             } else {
+                gameState.isAIMoving = false;
                 document.getElementById('status').innerText = '执黑先行';
+                computeHints();
             }
         }
 
+        document.getElementById('undo').onclick = undo;
         document.getElementById('restart').onclick = reset;
         document.getElementById('btnPlayAgain').onclick = reset;
         document.getElementById('btnCloseResult').onclick = () => document.getElementById('resultModal').classList.add('hidden');
+        document.getElementById('hintEnabled').onchange = () => {
+            if (document.getElementById('hintEnabled').checked) {
+                computeHints();
+            } else {
+                clearHints();
+            }
+        };
         
         window.onload = init;
     </script>
