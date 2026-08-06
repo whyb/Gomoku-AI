@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
     <title>五子棋AI</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
@@ -27,8 +27,14 @@
         @layer utilities {
             .board-wrapper {
                 @apply relative w-full aspect-square bg-wood shadow-2xl rounded-sm;
-                max-width: min(90vw, 600px);
+                max-width: min(92vw, 600px);
                 margin: 0 auto;
+            }
+            @media (min-width: 768px) {
+                .board-wrapper { max-width: min(90vw, 660px); }
+            }
+            @media (min-width: 1280px) {
+                .board-wrapper { max-width: min(88vw, 720px); }
             }
             .grid-container {
                 @apply absolute inset-0;
@@ -94,6 +100,19 @@
                 animation: pulse-border 1.5s infinite;
             }
 
+            /* 移动端交互优化: 消除点击高亮闪烁与 300ms 双击缩放延迟 */
+            button, select, input[type="checkbox"], label, .intersect-point {
+                touch-action: manipulation;
+                -webkit-tap-highlight-color: transparent;
+            }
+            /* 刘海屏/全面屏安全区留白 */
+            .safe-pad {
+                padding-top: max(1.5rem, env(safe-area-inset-top));
+                padding-right: max(1rem, env(safe-area-inset-right));
+                padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
+                padding-left: max(1rem, env(safe-area-inset-left));
+            }
+
             @keyframes pulse-border {
                 0% { opacity: 0.4; transform: scale(0.95); }
                 50% { opacity: 1; transform: scale(1.05); }
@@ -102,22 +121,22 @@
         }
     </style>
 </head>
-<body class="bg-[#F4F1EA] min-h-screen flex flex-col items-center py-6 px-4 font-sans text-primary">
+<body class="bg-[#F4F1EA] min-h-screen flex flex-col items-center safe-pad font-sans text-primary">
     
-    <div class="w-full max-w-[600px] mb-4 flex flex-col gap-4">
+    <div class="w-full max-w-[600px] sm:max-w-[680px] lg:max-w-[760px] mb-4 flex flex-col gap-4">
         <div class="flex justify-between items-start px-2">
             <div>
                 <h1 class="text-2xl md:text-3xl font-serif font-bold tracking-tight">五子棋 <span class="text-secondary font-sans">AI</span></h1>
                 <p class="text-[10px] uppercase tracking-[0.2em] opacity-50 text-line">Professional ResNet Engine</p>
             </div>
-            <a href="https://github.com/whyb/Gomoku-AI/" target="_blank" class="flex items-center gap-2 bg-white/40 px-3 py-1.5 rounded-full border border-white/60 hover:bg-white/80 transition-all shadow-sm">
+            <a href="https://github.com/whyb/Gomoku-AI/" target="_blank" class="flex items-center gap-2 bg-white/40 px-3 py-2 sm:py-1.5 rounded-full border border-white/60 hover:bg-white/80 transition-all shadow-sm">
                 <i class="fa fa-github text-lg"></i>
                 <span class="text-xs font-bold hidden sm:inline">关于本项目</span>
             </a>
         </div>
         
-        <div class="flex justify-between items-center bg-white/60 backdrop-blur-sm p-3 rounded-xl shadow-sm border border-white/40">
-            <div class="flex gap-4">
+        <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 bg-white/60 backdrop-blur-sm p-3 sm:p-4 rounded-xl shadow-sm border border-white/40">
+            <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
                 <div class="flex items-center gap-2">
                     <div class="w-4 h-4 rounded-full piece-black shadow-sm"></div>
                     <span id="labelP1" class="text-xs font-bold">玩家(黑)</span>
@@ -127,10 +146,10 @@
                     <span id="labelP2" class="text-xs font-bold">AI(白)</span>
                 </div>
             </div>
-            <div class="flex items-center gap-3">
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-2 justify-start sm:justify-end">
                 <label class="flex items-center gap-1.5">
-                    <span class="text-[11px] font-medium">棋盘大小</span>
-                    <select id="boardSize" class="bg-white/70 border border-gray-300 rounded-md text-[11px] px-1.5 py-1 focus:ring-secondary focus:border-secondary">
+                    <span class="text-xs sm:text-[11px] font-medium">棋盘大小</span>
+                    <select id="boardSize" class="bg-white/70 border border-gray-300 rounded-md text-xs sm:text-[11px] px-2 py-1.5 sm:px-1.5 sm:py-1 focus:ring-secondary focus:border-secondary">
                         <option value="5">5</option>
                         <option value="6">6</option>
                         <option value="7">7</option>
@@ -145,18 +164,18 @@
                     </select>
                 </label>
                 <label class="flex items-center cursor-pointer gap-2">
-                    <input type="checkbox" id="aiFirst" class="w-4 h-4 rounded border-gray-300 text-secondary focus:ring-secondary" checked>
-                    <span class="text-[11px] font-medium">AI先手</span>
+                    <input type="checkbox" id="aiFirst" class="w-5 h-5 sm:w-4 sm:h-4 rounded border-gray-300 text-secondary focus:ring-secondary" checked>
+                    <span class="text-xs sm:text-[11px] font-medium">AI先手</span>
                 </label>
                 <label class="flex items-center cursor-pointer gap-2">
-                    <input type="checkbox" id="hintEnabled" class="w-4 h-4 rounded border-gray-300 text-secondary focus:ring-secondary">
-                    <span class="text-[11px] font-medium">落子提示</span>
+                    <input type="checkbox" id="hintEnabled" class="w-5 h-5 sm:w-4 sm:h-4 rounded border-gray-300 text-secondary focus:ring-secondary">
+                    <span class="text-xs sm:text-[11px] font-medium">落子提示</span>
                 </label>
-                <div class="h-4 w-px bg-gray-300 mx-1"></div>
-                <button id="undo" class="bg-amber-100 text-amber-800 border border-amber-500 text-[11px] px-3 py-1.5 rounded-lg hover:bg-amber-500 hover:text-white transition-colors shadow-sm">
+                <div class="h-4 w-px bg-gray-300 mx-1 hidden sm:block"></div>
+                <button id="undo" class="bg-amber-100 text-amber-800 border border-amber-500 text-xs sm:text-[11px] px-3.5 py-2 sm:px-3 sm:py-1.5 rounded-lg hover:bg-amber-500 hover:text-white transition-colors shadow-sm whitespace-nowrap">
                     悔棋
                 </button>
-                <button id="restart" class="bg-primary text-white text-[11px] px-3 py-1.5 rounded-lg hover:bg-secondary transition-colors shadow-sm">
+                <button id="restart" class="bg-primary text-white text-xs sm:text-[11px] px-3.5 py-2 sm:px-3 sm:py-1.5 rounded-lg hover:bg-secondary transition-colors shadow-sm whitespace-nowrap">
                     重置游戏
                 </button>
             </div>
@@ -405,6 +424,230 @@
             points[index + 1].appendChild(marker);
         }
 
+        // ---------- 战术层: 强制走法 (与 mcts.py 的 get_forced_move 同逻辑) ----------
+        // 1. 自己能连五 → 必走
+        // 2. 对手能连五 → 必堵 (堵不住则尽力)
+        // 3. 自己能形成活四/双四 → 必胜手
+        // 4. 对手活三/跳三 → 化解其活四点
+        // 5. 对手 ≥2 个活三 → 堵住最多三端
+        function boardNearCells(b) {
+            const cells = new Set();
+            let any = false;
+            for (let i = 0; i < boardSquare; i++) {
+                if (b[i] === 0) continue;
+                any = true;
+                const r = Math.floor(i / boardSize), c = i % boardSize;
+                for (let dr = -2; dr <= 2; dr++) {
+                    for (let dc = -2; dc <= 2; dc++) {
+                        const nr = r + dr, nc = c + dc;
+                        if (nr >= 0 && nr < boardSize && nc >= 0 && nc < boardSize) {
+                            const j = nr * boardSize + nc;
+                            if (b[j] === 0) cells.add(j);
+                        }
+                    }
+                }
+            }
+            if (!any) {
+                const cx = Math.floor(boardSize / 2);
+                for (let dr = -1; dr <= 1; dr++)
+                    for (let dc = -1; dc <= 1; dc++) {
+                        const nr = cx + dr, nc = cx + dc;
+                        if (nr >= 0 && nr < boardSize && nc >= 0 && nc < boardSize)
+                            cells.add(nr * boardSize + nc);
+                    }
+            }
+            return [...cells];
+        }
+        function placeAt(b, cell, player) {
+            const nb = b.slice();
+            nb[cell] = player;
+            return nb;
+        }
+        function makesFiveAt(b, cell, player) {
+            const r = Math.floor(cell / boardSize), c = cell % boardSize;
+            const dirs = [[0, 1], [1, 0], [1, 1], [1, -1]];
+            for (const [dr, dc] of dirs) {
+                let cnt = 1;
+                for (let s = 1; ; s++) {
+                    const nr = r + dr * s, nc = c + dc * s;
+                    if (nr < 0 || nr >= boardSize || nc < 0 || nc >= boardSize ||
+                        b[nr * boardSize + nc] !== player) break;
+                    cnt++;
+                }
+                for (let s = 1; ; s++) {
+                    const nr = r - dr * s, nc = c - dc * s;
+                    if (nr < 0 || nr >= boardSize || nc < 0 || nc >= boardSize ||
+                        b[nr * boardSize + nc] !== player) break;
+                    cnt++;
+                }
+                if (cnt >= 5) return true;
+            }
+            return false;
+        }
+        // player 一步即可连五的空位
+        function winPoints(b, player, cells) {
+            const pts = [];
+            for (const i of cells) {
+                if (b[i] !== 0) continue;
+                const nb = placeAt(b, i, player);
+                if (makesFiveAt(nb, i, player)) pts.push(i);
+            }
+            return pts;
+        }
+        // player 落子后能形成 ≥2 个下一步胜点 (活四/双四) 的空位
+        function forkCells(b, player, cells) {
+            const res = [];
+            for (const i of cells) {
+                if (b[i] !== 0) continue;
+                const nb = placeAt(b, i, player);
+                if (makesFiveAt(nb, i, player)) continue;  // 一步胜不是双威胁
+                let cnt = 0;
+                for (const j of cells) {
+                    if (j === i || nb[j] !== 0) continue;
+                    const nb2 = placeAt(nb, j, player);
+                    if (makesFiveAt(nb2, j, player)) {
+                        cnt++;
+                        if (cnt >= 2) break;
+                    }
+                }
+                if (cnt >= 2) res.push(i);
+            }
+            return res;
+        }
+        // 恰好 3 连且两端为空的活三线段
+        function liveThreeLines(b, player) {
+            const lines = [];
+            const dirs = [[0, 1], [1, 0], [1, 1], [1, -1]];
+            for (let i = 0; i < boardSquare; i++) {
+                if (b[i] !== player) continue;
+                const r = Math.floor(i / boardSize), c = i % boardSize;
+                for (const [dr, dc] of dirs) {
+                    const br = r - dr, bc = c - dc;
+                    if (br >= 0 && br < boardSize && bc >= 0 && bc < boardSize &&
+                        b[br * boardSize + bc] === player) continue;  // 非连续段起点
+                    let ok = true;
+                    const pts = [];
+                    for (let k = 0; k < 3; k++) {
+                        const nr = r + dr * k, nc = c + dc * k;
+                        if (nr < 0 || nr >= boardSize || nc < 0 || nc >= boardSize) {
+                            ok = false;
+                            break;
+                        }
+                        pts.push(nr * boardSize + nc);
+                    }
+                    if (!ok) continue;
+                    if (b[pts[0]] !== player || b[pts[1]] !== player ||
+                        b[pts[2]] !== player) continue;
+                    const e1r = r - dr, e1c = c - dc;
+                    const e2r = r + 3 * dr, e2c = c + 3 * dc;
+                    if (e2r >= 0 && e2r < boardSize && e2c >= 0 && e2c < boardSize &&
+                        b[e2r * boardSize + e2c] === player) continue;  // 多于 3 连
+                    if (e1r < 0 || e1r >= boardSize || e1c < 0 || e1c >= boardSize) continue;
+                    if (e2r < 0 || e2r >= boardSize || e2c < 0 || e2c >= boardSize) continue;
+                    if (b[e1r * boardSize + e1c] !== 0 ||
+                        b[e2r * boardSize + e2c] !== 0) continue;
+                    lines.push({ e1: e1r * boardSize + e1c, e2: e2r * boardSize + e2c });
+                }
+            }
+            return lines;
+        }
+        function compareKeys(a, b) {
+            for (let i = 0; i < a.length; i++) {
+                if (a[i] !== b[i]) return a[i] - b[i];
+            }
+            return 0;
+        }
+        // 返回 {action, reason} 或 null (交给神经网络)
+        function bestTacticalMove(b, ai) {
+            const hu = 3 - ai;
+            const near = boardNearCells(b);
+            if (near.length === 0) return null;
+
+            // 1. 自己能连五
+            const aiWins = winPoints(b, ai, near);
+            if (aiWins.length) return { action: aiWins[0], reason: 'win' };
+
+            // 2. 对手能连五 → 必须堵 (优先化解活四/自带反击)
+            const huWins = winPoints(b, hu, near);
+            if (huWins.length) {
+                let best = null, bestKey = null;
+                const cands = [...huWins, ...near.filter(c => !huWins.includes(c))];
+                for (const m of cands) {
+                    const nb = placeAt(b, m, ai);
+                    if (winPoints(nb, hu, near).length > 0) continue;  // 未堵住所有胜点
+                    const key = [0, -forkCells(nb, hu, near).length,
+                                 forkCells(nb, ai, near).length + winPoints(nb, ai, near).length];
+                    if (bestKey === null || compareKeys(key, bestKey) > 0) {
+                        bestKey = key;
+                        best = m;
+                    }
+                }
+                if (best !== null) return { action: best, reason: 'block_win' };
+                return { action: huWins[0], reason: 'block_win_lost' };  // 活四/双四堵不住
+            }
+
+            // 3. 自己能形成活四/双四 (必胜手)
+            const aiForks = forkCells(b, ai, near);
+            if (aiForks.length) {
+                let best = aiForks[0], bestKey = null;
+                for (const m of aiForks) {
+                    const nb = placeAt(b, m, ai);
+                    const key = [-forkCells(nb, hu, near).length,
+                                 forkCells(nb, ai, near).length];
+                    if (bestKey === null || compareKeys(key, bestKey) > 0) {
+                        bestKey = key;
+                        best = m;
+                    }
+                }
+                return { action: best, reason: 'own_fork' };
+            }
+
+            // 4. 对手活三/跳三 → 化解其活四点
+            const huForks = forkCells(b, hu, near);
+            if (huForks.length) {
+                let best = null, bestKey = null;
+                const cands = [...huForks, ...near.filter(c => !huForks.includes(c))];
+                for (const m of cands) {
+                    const nb = placeAt(b, m, ai);
+                    if (winPoints(nb, hu, near).length > 0) continue;  // 未堵现有冲四
+                    const left = forkCells(nb, hu, near).length;
+                    const key = [left === 0 ? 1 : 0, -left,
+                                 forkCells(nb, ai, near).length + winPoints(nb, ai, near).length];
+                    if (bestKey === null || compareKeys(key, bestKey) > 0) {
+                        bestKey = key;
+                        best = m;
+                    }
+                }
+                if (best !== null) return { action: best, reason: 'block_fork' };
+            }
+
+            // 5. 对手 ≥2 个活三 → 堵住最多活三端
+            const huThrees = liveThreeLines(b, hu);
+            if (huThrees.length >= 2) {
+                const ends = {};
+                for (const ln of huThrees) {
+                    ends[ln.e1] = (ends[ln.e1] || 0) + 1;
+                    ends[ln.e2] = (ends[ln.e2] || 0) + 1;
+                }
+                let best = null, bestKey = null;
+                const cands = [...new Set([...near, ...Object.keys(ends).map(Number)])];
+                for (const m of cands) {
+                    const covered = ends[m] || 0;
+                    if (covered === 0) continue;
+                    const nb = placeAt(b, m, ai);
+                    const key = [covered,
+                                 forkCells(nb, ai, near).length + winPoints(nb, ai, near).length];
+                    if (bestKey === null || compareKeys(key, bestKey) > 0) {
+                        bestKey = key;
+                        best = m;
+                    }
+                }
+                if (best !== null) return { action: best, reason: 'block_live3' };
+            }
+
+            return null;
+        }
+
         async function aiLogic() {
             try {
                 const myEpoch = aiEpoch;
@@ -414,21 +657,28 @@
                     const center = Math.floor(boardSize / 2);
                     bestMove = center * boardSize + center;
                 } else {
-                    const input = new Float32Array(boardSquare * 2).fill(0);
-                    // 模型输入为当前玩家视角: channel0=当前玩家(AI)棋子, channel1=对手(人类)棋子
-                    gameState.board.forEach((val, i) => {
-                        if (val === gameState.aiPlayer) input[i] = 1;
-                        if (val === gameState.humanPlayer) input[i + boardSquare] = 1;
-                    });
-                    const tensor = new ort.Tensor('float32', input, [1, 2, boardSize, boardSize]);
-                    const output = await gameState.model.run({ input: tensor });
-                    if (myEpoch !== aiEpoch || gameState.gameOver) return;  // 已被悔棋/重置
-                    const logits = output.policy_logits.data;
-                    let maxVal = -Infinity;
-                    for (let i = 0; i < boardSquare; i++) {
-                        if (gameState.board[i] === 0 && logits[i] > maxVal) {
-                            maxVal = logits[i];
-                            bestMove = i;
+                    // 战术层: 强制走法 (连五/堵五/活四双四/活三防守)
+                    const tactical = bestTacticalMove(gameState.board, gameState.aiPlayer);
+                    if (tactical) {
+                        bestMove = tactical.action;
+                        console.log('[战术]', tactical.reason, '→', bestMove);
+                    } else {
+                        const input = new Float32Array(boardSquare * 2).fill(0);
+                        // 模型输入为当前玩家视角: channel0=当前玩家(AI)棋子, channel1=对手(人类)棋子
+                        gameState.board.forEach((val, i) => {
+                            if (val === gameState.aiPlayer) input[i] = 1;
+                            if (val === gameState.humanPlayer) input[i + boardSquare] = 1;
+                        });
+                        const tensor = new ort.Tensor('float32', input, [1, 2, boardSize, boardSize]);
+                        const output = await gameState.model.run({ input: tensor });
+                        if (myEpoch !== aiEpoch || gameState.gameOver) return;  // 已被悔棋/重置
+                        const logits = output.policy_logits.data;
+                        let maxVal = -Infinity;
+                        for (let i = 0; i < boardSquare; i++) {
+                            if (gameState.board[i] === 0 && logits[i] > maxVal) {
+                                maxVal = logits[i];
+                                bestMove = i;
+                            }
                         }
                     }
                 }
