@@ -15,6 +15,7 @@ AlphaZero 模型验证脚本 — 适配 model_alphazero.py
 
 随机性说明:
   - 模型前向推理是确定性的 (固定权重 + eval 模式)
+  - 模型落子前先走战术守卫 (与 webdemo 一致): 必赢/必堵/活四双四/活三防守直接短路
   - --epsilon 控制模型落子的随机探索率: 0=纯贪心(推荐评估), >0 时每步
     以该概率随机落子 (会明显拉低胜率)
   - --seed 固定随机种子后, 每局结果可完全复现
@@ -34,6 +35,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from model import Gomoku, get_valid_action
 from model_alphazero import GomokuNetAlphaZero, GomokuNetAlphaZeroSmall
+from mcts import get_forced_move
 from config import Config, update_config_from_cli
 
 
@@ -133,11 +135,18 @@ def play_round(board_size, win_condition, model_state_dict,
                 # 先手第一手随机落子 (均匀分布), 不固定天元
                 action = np.random.randint(total_cells)
             else:
-                with torch.no_grad():
-                    logits, _ = model(state_tensor)
-                board_flat = torch.tensor(env.board.flatten())
-                action = get_valid_action(logits, board_flat, board_size,
-                                          epsilon=epsilon)
+                # 战术守卫: 必赢/必堵/活四双四/活三防守 直接短路 (与实际对弈一致)
+                forced_action, _ = get_forced_move(
+                    env.board, env.current_player, win_condition
+                )
+                if forced_action is not None:
+                    action = forced_action
+                else:
+                    with torch.no_grad():
+                        logits, _ = model(state_tensor)
+                    board_flat = torch.tensor(env.board.flatten())
+                    action = get_valid_action(logits, board_flat, board_size,
+                                              epsilon=epsilon)
 
         if action == -1:
             return first_player, 0  # 棋盘已满 → 平局

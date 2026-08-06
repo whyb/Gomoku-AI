@@ -1573,7 +1573,9 @@ def main():
     parser.add_argument('--cpu_workers', type=int, default=0,
                         help='CPU 并行 worker 数 (0=串行GPU模式, >0=多进程CPU自博弈)')
     parser.add_argument('--mcts_human_knowledge', action='store_true',
-                        help='在 MCTS 搜索树中启用人类知识增强 (连五/挡四/活三检测), 默认关闭')
+                        help='在 MCTS 搜索树中启用战术知识增强 '
+                             '(连五/堵五 +10, 活四双四/化解对手活四点 +8), '
+                             '默认关闭; 胜点检测已向量化+缓存, 开销远小于逐叶扫描')
     parser.add_argument('--save_interval_hours', type=float, default=1.0,
                         help='自动保存间隔 (小时, 默认 1.0, 设为 0 禁用)')
 

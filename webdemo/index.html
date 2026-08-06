@@ -424,21 +424,18 @@
             points[index + 1].appendChild(marker);
         }
 
-        // ---------- 战术层: 强制走法 (与 mcts.py 的 get_forced_move 同逻辑) ----------
-        // 1. 自己能连五 → 必走
-        // 2. 对手能连五 → 必堵 (堵不住则尽力)
-        // 3. 自己能形成活四/双四 → 必胜手
-        // 4. 对手活三/跳三 → 化解其活四点
-        // 5. 对手 ≥2 个活三 → 堵住最多三端
-        function boardNearCells(b) {
+        // ---------- 战术层 (与 mcts.py 当前版本同步) ----------
+        // 硬强制走法 bestTacticalMove: 连五/堵五/活四双四/化解活四点/双活三堵三端
+        function boardNearCells(b, radius) {
+            if (radius === undefined) radius = 2;
             const cells = new Set();
             let any = false;
             for (let i = 0; i < boardSquare; i++) {
                 if (b[i] === 0) continue;
                 any = true;
                 const r = Math.floor(i / boardSize), c = i % boardSize;
-                for (let dr = -2; dr <= 2; dr++) {
-                    for (let dc = -2; dc <= 2; dc++) {
+                for (let dr = -radius; dr <= radius; dr++) {
+                    for (let dc = -radius; dc <= radius; dc++) {
                         const nr = r + dr, nc = c + dc;
                         if (nr >= 0 && nr < boardSize && nc >= 0 && nc < boardSize) {
                             const j = nr * boardSize + nc;
@@ -484,6 +481,41 @@
             }
             return false;
         }
+        // 线性方向计数: 落子 cell 后 player 的下一步胜点 (对应 _win_points_after_play)
+        function winPointsAfterMove(b, cell, player) {
+            const pts = new Set();
+            const r = Math.floor(cell / boardSize), c = cell % boardSize;
+            const dirs = [[0, 1], [1, 0], [1, 1], [1, -1]];
+            for (const [dr, dc] of dirs) {
+                let cnt = 1;
+                for (let s = 1; ; s++) {
+                    const nr = r + dr * s, nc = c + dc * s;
+                    if (nr < 0 || nr >= boardSize || nc < 0 || nc >= boardSize ||
+                        b[nr * boardSize + nc] !== player) break;
+                    cnt++;
+                }
+                for (let s = 1; ; s++) {
+                    const nr = r - dr * s, nc = c - dc * s;
+                    if (nr < 0 || nr >= boardSize || nc < 0 || nc >= boardSize ||
+                        b[nr * boardSize + nc] !== player) break;
+                    cnt++;
+                }
+                if (cnt < 4) continue;  // 不足四连, 两端无法一步成五
+                for (const s of [1, -1]) {
+                    let nr = r + s * dr, nc = c + s * dc;
+                    while (nr >= 0 && nr < boardSize && nc >= 0 && nc < boardSize &&
+                           b[nr * boardSize + nc] === player) {
+                        nr += s * dr;
+                        nc += s * dc;
+                    }
+                    if (nr >= 0 && nr < boardSize && nc >= 0 && nc < boardSize &&
+                        b[nr * boardSize + nc] === 0) {
+                        pts.add(nr * boardSize + nc);
+                    }
+                }
+            }
+            return [...pts];
+        }
         // player 一步即可连五的空位
         function winPoints(b, player, cells) {
             const pts = [];
@@ -494,25 +526,53 @@
             }
             return pts;
         }
-        // player 落子后能形成 ≥2 个下一步胜点 (活四/双四) 的空位
+        // player 落子后能形成 ≥2 个下一步胜点 (活四/双四) 的空位;
+        // 用 winPointsAfterMove 线性计数, 替代原来的 O(候选²) 双重模拟 (与 Python 对齐)
         function forkCells(b, player, cells) {
             const res = [];
             for (const i of cells) {
                 if (b[i] !== 0) continue;
                 const nb = placeAt(b, i, player);
                 if (makesFiveAt(nb, i, player)) continue;  // 一步胜不是双威胁
-                let cnt = 0;
-                for (const j of cells) {
-                    if (j === i || nb[j] !== 0) continue;
-                    const nb2 = placeAt(nb, j, player);
-                    if (makesFiveAt(nb2, j, player)) {
-                        cnt++;
-                        if (cnt >= 2) break;
-                    }
-                }
-                if (cnt >= 2) res.push(i);
+                if (winPointsAfterMove(nb, i, player).length >= 2) res.push(i);
             }
             return res;
+        }
+        function countStones(b, player) {
+            let n = 0;
+            for (let i = 0; i < boardSquare; i++) if (b[i] === player) n++;
+            return n;
+        }
+        // 软战术先验 {动作: 等级}, 与 Python _tactical_prior 一致:
+        //   10 = 自己能连五 / 对手立即连五 (必走/必堵)
+        //    8 = 自己能形成活四/双四 / 对手活三跳三 (化解其活四点)
+        // 按子数快速跳过, 活四点分析只用半径 1 候选
+        function tacticalPrior(b, ai) {
+            const hu = 3 - ai;
+            const prior = {};
+            const aiCount = countStones(b, ai);
+            const huCount = countStones(b, hu);
+            if (aiCount >= 4) {
+                const near1 = boardNearCells(b, 1);
+                for (const a of winPoints(b, ai, near1)) prior[a] = 10;
+            }
+            if (huCount >= 4) {
+                const near1 = boardNearCells(b, 1);
+                for (const a of winPoints(b, hu, near1)) prior[a] = 10;
+            }
+            if (aiCount >= 3) {
+                const near1 = boardNearCells(b, 1);
+                for (const a of forkCells(b, ai, near1)) {
+                    if ((prior[a] || 0) < 8) prior[a] = 8;
+                }
+            }
+            if (huCount >= 3) {
+                const near1 = boardNearCells(b, 1);
+                for (const a of forkCells(b, hu, near1)) {
+                    if ((prior[a] || 0) < 8) prior[a] = 8;
+                }
+            }
+            return prior;
         }
         // 恰好 3 连且两端为空的活三线段
         function liveThreeLines(b, player) {
@@ -562,13 +622,15 @@
             const hu = 3 - ai;
             const near = boardNearCells(b);
             if (near.length === 0) return null;
+            const aiCount = countStones(b, ai);
+            const huCount = countStones(b, hu);
 
             // 1. 自己能连五
-            const aiWins = winPoints(b, ai, near);
+            const aiWins = aiCount >= 4 ? winPoints(b, ai, near) : [];
             if (aiWins.length) return { action: aiWins[0], reason: 'win' };
 
             // 2. 对手能连五 → 必须堵 (优先化解活四/自带反击)
-            const huWins = winPoints(b, hu, near);
+            const huWins = huCount >= 4 ? winPoints(b, hu, near) : [];
             if (huWins.length) {
                 let best = null, bestKey = null;
                 const cands = [...huWins, ...near.filter(c => !huWins.includes(c))];
@@ -587,7 +649,7 @@
             }
 
             // 3. 自己能形成活四/双四 (必胜手)
-            const aiForks = forkCells(b, ai, near);
+            const aiForks = aiCount >= 3 ? forkCells(b, ai, near) : [];
             if (aiForks.length) {
                 let best = aiForks[0], bestKey = null;
                 for (const m of aiForks) {
@@ -603,7 +665,7 @@
             }
 
             // 4. 对手活三/跳三 → 化解其活四点
-            const huForks = forkCells(b, hu, near);
+            const huForks = huCount >= 3 ? forkCells(b, hu, near) : [];
             if (huForks.length) {
                 let best = null, bestKey = null;
                 const cands = [...huForks, ...near.filter(c => !huForks.includes(c))];
@@ -622,7 +684,7 @@
             }
 
             // 5. 对手 ≥2 个活三 → 堵住最多活三端
-            const huThrees = liveThreeLines(b, hu);
+            const huThrees = huCount >= 3 ? liveThreeLines(b, hu) : [];
             if (huThrees.length >= 2) {
                 const ends = {};
                 for (const ln of huThrees) {
@@ -673,6 +735,22 @@
                         const output = await gameState.model.run({ input: tensor });
                         if (myEpoch !== aiEpoch || gameState.gameOver) return;  // 已被悔棋/重置
                         const logits = output.policy_logits.data;
+                        // 软战术先验: 无强制走法时也对 NN logits 叠加 +10/+8
+                        // (与 Python --mcts_human_knowledge 的 _apply_tactical_prior 一致)
+                        const prior = tacticalPrior(gameState.board, gameState.aiPlayer);
+                        let maxLogit = -Infinity;
+                        for (let i = 0; i < boardSquare; i++) {
+                            if (gameState.board[i] === 0 && logits[i] > maxLogit) {
+                                maxLogit = logits[i];
+                            }
+                        }
+                        if (maxLogit !== -Infinity) {
+                            for (const key of Object.keys(prior)) {
+                                const a = Number(key);
+                                const v = maxLogit + prior[key];
+                                if (logits[a] < v) logits[a] = v;
+                            }
+                        }
                         let maxVal = -Infinity;
                         for (let i = 0; i < boardSquare; i++) {
                             if (gameState.board[i] === 0 && logits[i] > maxVal) {

@@ -134,50 +134,414 @@ def _find_opponent_threats(board: np.ndarray, player: int,
     return {'must_block': must_block, 'threats': threats}
 
 
-def get_forced_move(board: np.ndarray, player: int,
-                    win_condition: int = 5) -> Tuple[Optional[int], Optional[str]]:
+def _shift_mask(mask: np.ndarray, dx: int, dy: int) -> np.ndarray:
+    """把 bool 掩码沿 (dx,dy) 平移, 越界处补 False (numpy 向量化用)"""
+    h, w = mask.shape
+    out = np.zeros_like(mask)
+    if dx >= 0:
+        sx0, tx0, cntx = 0, dx, h - dx
+    else:
+        sx0, tx0, cntx = -dx, 0, h + dx
+    if dy >= 0:
+        sy0, ty0, cnty = 0, dy, w - dy
+    else:
+        sy0, ty0, cnty = -dy, 0, w + dy
+    if cntx > 0 and cnty > 0:
+        out[tx0:tx0 + cntx, ty0:ty0 + cnty] = mask[sx0:sx0 + cntx, sy0:sy0 + cnty]
+    return out
+
+
+def _win_points_np(board: np.ndarray, player: int,
+                   win_condition: int = 5) -> set:
     """
-    查找强制走法（规则短路），优先级：
-      1. 自己能连五 → 直接获胜
-      2. 对手有必堵点 (冲四/连四/跳四) → 必须堵 (即使有多个也挑一个)
-      3. 对手已有连五点（兜底检测）
-    返回: (action, reason) 或 (None, None)
+    向量化检测 player 一步即可连成 win_condition 的所有空位.
+
+    枚举 5 连窗口内空位的 5 种位置 (k=0..4), 用移位掩码 AND 判断其余 4 格是否全是
+    本方棋子, 等价于逐格 _check_win_static 全盘扫描, 但由 numpy 完成.
     """
     h, w = board.shape
+    p_mask = (board == player)
+    empty = (board == 0)
+    points = np.zeros((h, w), dtype=bool)
+    directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
+    for dx, dy in directions:
+        for k in range(win_condition):
+            ok = empty.copy()
+            for o in range(win_condition):
+                if o == k:
+                    continue
+                ok &= _shift_mask(p_mask, (o - k) * dx, (o - k) * dy)
+            points |= ok
+    return {int(i) for i in np.flatnonzero(points.reshape(-1))}
 
-    # 1. 自己立即获胜
-    win_action = _find_immediate_win(board, player)
-    if win_action is not None:
-        return win_action, 'win'
 
-    # 2. 对手威胁检测 (滑动窗口, 覆盖连四/跳四等所有 4-in-W 形态)
-    threats = _find_opponent_threats(board, player, win_condition)
-    must_block = threats['must_block']
-
-    if len(must_block) == 1:
-        return must_block.pop(), 'block'
-    elif len(must_block) >= 2:
-        # 多个必堵点: 优先选同时覆盖 threats (活三/冲三) 的交叉点
-        # 旧逻辑: 冲四永远强制堵, 跳过 MCTS 以提速
-        threat_points = threats['threats']
-        overlap = must_block & threat_points
-        if overlap:
-            return overlap.pop(), 'block'
-        return must_block.pop(), 'block'
-
-    # 3. 兜底: 对手已有连五点 (理论上前面已覆盖，此处保底)
-    opponent = 3 - player
-    opponent_win_points = set()
+def _empty_near_stones(board: np.ndarray,
+                       radius: int = 2) -> List[Tuple[int, int]]:
+    """返回已有棋子周围 radius 格内的空点 [(x, y), ...]; 空棋盘返回中心 3x3"""
+    h, w = board.shape
+    cells = []
+    if not board.any():
+        cx, cy = h // 2, w // 2
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+                nx, ny = cx + dx, cy + dy
+                if 0 <= nx < h and 0 <= ny < w and board[nx, ny] == 0:
+                    cells.append((nx, ny))
+        return cells
+    seen = set()
     for x in range(h):
         for y in range(w):
             if board[x, y] == 0:
-                board[x, y] = opponent
-                win = _check_win_static(board, x, y, win_condition)
-                board[x, y] = 0
-                if win:
-                    opponent_win_points.add(x * w + y)
-    if len(opponent_win_points) == 1:
-        return opponent_win_points.pop(), 'block_win'
+                continue
+            for dx in range(-radius, radius + 1):
+                for dy in range(-radius, radius + 1):
+                    nx, ny = x + dx, y + dy
+                    if (0 <= nx < h and 0 <= ny < w and board[nx, ny] == 0
+                            and (nx, ny) not in seen):
+                        seen.add((nx, ny))
+                        cells.append((nx, ny))
+    return cells
+
+
+def _find_win_points(board: np.ndarray, player: int,
+                     win_condition: int = 5,
+                     candidates: Optional[List[Tuple[int, int]]] = None
+                     ) -> set:
+    """返回 player 一步即可连成 win_condition 的所有空位 (扁平索引)"""
+    h, w = board.shape
+    if candidates is None:
+        candidates = _empty_near_stones(board)
+    points = set()
+    for x, y in candidates:
+        if board[x, y] != 0:
+            continue
+        board[x, y] = player
+        if _check_win_static(board, x, y, win_condition):
+            points.add(x * w + y)
+        board[x, y] = 0
+    return points
+
+
+def _find_four_moves(board: np.ndarray, player: int,
+                     win_condition: int = 5,
+                     candidates: Optional[List[Tuple[int, int]]] = None
+                     ) -> Dict[int, set]:
+    """
+    对每个候选空位模拟 player 落子, 返回 {动作: 落子后 player 的下一步胜点集合}.
+
+    胜点数 >= 2 表示形成活四/双四 (强制胜手), == 1 表示冲四.
+    不包含落子本身一步获胜的情况 (由 _find_win_points 处理).
+    """
+    h, w = board.shape
+    if candidates is None:
+        candidates = _empty_near_stones(board, radius=1)  # 活四/双四点必紧邻棋子
+    result = {}
+    for x, y in candidates:
+        if board[x, y] != 0:
+            continue
+        board[x, y] = player
+        wins = _win_points_after_play(board, x, y, player, win_condition)
+        if wins:
+            result[x * w + y] = wins
+        board[x, y] = 0
+    return result
+
+
+def _win_points_after_play(board: np.ndarray, x: int, y: int, player: int,
+                           win_condition: int = 5) -> set:
+    """
+    在 (x,y) 已落子的棋盘上, 计算 player 下一步可连成五的所有空位.
+
+    只用方向连续计数 (O(4×len)), 等价于对每个空位做 _check_win_static 的全盘扫描.
+    """
+    h, w = board.shape
+    pts = set()
+    directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
+    for dx, dy in directions:
+        count = 1
+        for s in (1, -1):
+            nx, ny = x + s * dx, y + s * dy
+            while 0 <= nx < h and 0 <= ny < w and board[nx, ny] == player:
+                count += 1
+                nx += s * dx
+                ny += s * dy
+        if count < win_condition - 1:
+            continue  # 不足四连, 两端无法一步成五
+        # 两个延伸端: 空位且在界内 → 一步胜点
+        for s in (1, -1):
+            nx, ny = x + s * dx, y + s * dy
+            while 0 <= nx < h and 0 <= ny < w and board[nx, ny] == player:
+                nx += s * dx
+                ny += s * dy
+            if 0 <= nx < h and 0 <= ny < w and board[nx, ny] == 0:
+                pts.add(nx * w + ny)
+    return pts
+
+
+def _find_open_four_moves(board: np.ndarray, player: int,
+                          win_condition: int = 5,
+                          candidates: Optional[List[Tuple[int, int]]] = None
+                          ) -> set:
+    """返回 player 一手能形成活四/双四 (≥2 个下一步胜点) 的动作集合"""
+    four = _find_four_moves(board, player, win_condition, candidates)
+    return {c for c, wins in four.items() if len(wins) >= 2}
+
+
+def _find_live_three_lines(board: np.ndarray, player: int
+                           ) -> List[Tuple[int, int]]:
+    """返回 player 的简单活三线段 (恰好 3 连且两端为空) 的端点对 (扁平索引)"""
+    h, w = board.shape
+    directions = [(0, 1), (1, 0), (1, 1), (1, -1)]
+    lines = []
+    for x in range(h):
+        for y in range(w):
+            if board[x, y] != player:
+                continue
+            for dx, dy in directions:
+                bx, by = x - dx, y - dy
+                if 0 <= bx < h and 0 <= by < w and board[bx, by] == player:
+                    continue  # 不是该方向连续段的起点
+                pts = [(x + k * dx, y + k * dy) for k in range(3)]
+                if any(not (0 <= px < h and 0 <= py < w) for px, py in pts):
+                    continue
+                if any(board[px, py] != player for px, py in pts):
+                    continue
+                n4 = (pts[2][0] + dx, pts[2][1] + dy)
+                if 0 <= n4[0] < h and 0 <= n4[1] < w and board[n4] == player:
+                    continue  # 多于 3 连
+                e1 = (x - dx, y - dy)
+                e2 = (x + 3 * dx, y + 3 * dy)
+                if not (0 <= e1[0] < h and 0 <= e1[1] < w and board[e1] == 0):
+                    continue
+                if not (0 <= e2[0] < h and 0 <= e2[1] < w and board[e2] == 0):
+                    continue
+                lines.append((e1[0] * w + e1[1], e2[0] * w + e2[1]))
+    return lines
+
+
+def _apply_temp(board: np.ndarray, action: int, player: int,
+                w: int) -> np.ndarray:
+    """在棋盘副本上落子 (战术模拟用)"""
+    sim = board.copy()
+    sim[action // w, action % w] = player
+    return sim
+
+
+def _best_win_block(board: np.ndarray, player: int, opp_win: set,
+                    win_condition: int,
+                    candidates: List[Tuple[int, int]]) -> Optional[int]:
+    """对手存在一步胜点时, 找一手能同时堵住所有胜点的走法 (优先还化解对手活四); 无则 None"""
+    h, w = board.shape
+    opponent = 3 - player
+    # 胜点本身优先 (通常唯一堵点就是它), 再排邻近点
+    near_flats = [x * w + y for x, y in candidates]
+    cands = list(opp_win) + [c for c in near_flats if c not in opp_win]
+    best, best_key = None, None
+    for m in cands:
+        x, y = m // w, m % w
+        if board[x, y] != 0:
+            continue
+        sim = _apply_temp(board, m, player, w)
+        if _find_win_points(sim, opponent, win_condition, candidates):
+            continue  # 没有堵住所有胜点
+        left = _find_open_four_moves(sim, opponent, win_condition, candidates)
+        own = _find_open_four_moves(sim, player, win_condition, candidates)
+        own_win = _find_win_points(sim, player, win_condition, candidates)
+        key = (-len(left), len(own) + len(own_win))
+        if best_key is None or key > best_key:
+            best_key, best = key, m
+        if len(left) == 0:
+            break  # 唯一能堵住所有胜点的通常就是堵点本身, 找到即返回
+    return best
+
+
+def _best_fork_block(board: np.ndarray, player: int, opp_fork: set,
+                     win_condition: int,
+                     candidates: List[Tuple[int, int]]) -> Optional[int]:
+    """对手存在活四点时, 找一手棋: 优先完全化解, 其次堵最多并自带反击"""
+    h, w = board.shape
+    opponent = 3 - player
+    # 危险点 (活四点) 优先: 直接占住通常就能化解
+    near_flats = [x * w + y for x, y in candidates]
+    cands = list(opp_fork) + [c for c in near_flats if c not in opp_fork]
+    cands = cands[:48]  # 最坏情况 (双活三等无法一手化解) 也限时
+    best, best_key = None, None
+    for m in cands:
+        x, y = m // w, m % w
+        if board[x, y] != 0:
+            continue
+        sim = _apply_temp(board, m, player, w)
+        if _find_win_points(sim, opponent, win_condition, candidates):
+            continue  # 未堵住对手现有冲四
+        left = _find_open_four_moves(sim, opponent, win_condition, candidates)
+        own = _find_open_four_moves(sim, player, win_condition, candidates)
+        own_win = _find_win_points(sim, player, win_condition, candidates)
+        key = (len(left) == 0, -len(left), len(own) + len(own_win))
+        if best_key is None or key > best_key:
+            best_key, best = key, m
+        if len(left) == 0:
+            break  # 已完全化解对手活四, 无需继续扫描
+    return best
+
+
+def _pick_own_fork(board: np.ndarray, player: int, own_fork: set,
+                   win_condition: int,
+                   candidates: List[Tuple[int, int]]) -> int:
+    """自己有活四/双四胜手时, 挑一个同时削弱对手威胁的"""
+    h, w = board.shape
+    opponent = 3 - player
+    best, best_key = next(iter(own_fork)), None
+    for m in own_fork:
+        x, y = m // w, m % w
+        if board[x, y] != 0:
+            continue
+        sim = _apply_temp(board, m, player, w)
+        left = _find_open_four_moves(sim, opponent, win_condition, candidates)
+        own = _find_open_four_moves(sim, player, win_condition, candidates)
+        key = (-len(left), len(own))
+        if best_key is None or key > best_key:
+            best_key, best = key, m
+    return best
+
+
+def _best_live3_block(board: np.ndarray, player: int, three_lines: list,
+                      win_condition: int,
+                      candidates: List[Tuple[int, int]]) -> Optional[int]:
+    """对手 ≥2 个活三时, 选一手堵住最多活三端的走法, 兼顾自身反击"""
+    h, w = board.shape
+    ends = {}
+    for e1, e2 in three_lines:
+        ends[e1] = ends.get(e1, 0) + 1
+        ends[e2] = ends.get(e2, 0) + 1
+    cands = list({x * w + y for x, y in candidates} | set(ends.keys()))
+    best, best_key = None, None
+    for m in cands:
+        x, y = m // w, m % w
+        if board[x, y] != 0:
+            continue
+        covered = ends.get(m, 0)
+        if covered == 0:
+            continue
+        sim = _apply_temp(board, m, player, w)
+        own = _find_open_four_moves(sim, player, win_condition, candidates)
+        own_win = _find_win_points(sim, player, win_condition, candidates)
+        key = (covered, len(own) + len(own_win))
+        if best_key is None or key > best_key:
+            best_key, best = key, m
+    return best
+
+
+def _tactical_prior(board: np.ndarray, player: int,
+                    win_condition: int = 5) -> Dict[int, int]:
+    """
+    计算战术先验 {动作: 优先级等级}, 供 --mcts_human_knowledge 使用:
+      10 = 自己能连五 / 对手立即连五 (必走/必堵)
+       8 = 自己能形成活四/双四 (必胜手) / 对手活三跳三 (化解其活四点)
+
+    与 get_forced_move 的强制走法优先级一致, 但返回软先验、可按键值缓存,
+    且按子数快速跳过 (少于 win_condition-1 子不可能出现对应威胁).
+    """
+    prior: Dict[int, int] = {}
+    opponent = 3 - player
+    own_count = int((board == player).sum())
+    opp_count = int((board == opponent).sum())
+
+    # 1. 自己立即连五
+    if own_count >= win_condition - 1:
+        for a in _win_points_np(board, player, win_condition):
+            prior[a] = 10
+
+    # 2. 对手立即连五 → 必堵
+    if opp_count >= win_condition - 1:
+        for a in _win_points_np(board, opponent, win_condition):
+            prior[a] = 10
+
+    # 3. 自己能形成活四/双四
+    if own_count >= win_condition - 2:
+        for a in _find_open_four_moves(board, player, win_condition):
+            if prior.get(a, 0) < 8:
+                prior[a] = 8
+
+    # 4. 对手活三/跳三 → 化解其活四点
+    if opp_count >= win_condition - 2:
+        for a in _find_open_four_moves(board, opponent, win_condition):
+            if prior.get(a, 0) < 8:
+                prior[a] = 8
+
+    return prior
+
+
+def _apply_tactical_prior(policy: np.ndarray,
+                          prior: Dict[int, int]) -> None:
+    """把战术先验叠加到策略 logits: policy[a] = max(policy[a], max_logit + level)"""
+    if not prior:
+        return
+    max_logit = policy.max()
+    for a, level in prior.items():
+        v = max_logit + float(level)
+        if policy[a] < v:
+            policy[a] = v
+
+
+def _apply_tactical_boost(policy: np.ndarray, board: np.ndarray,
+                          player: int, win_condition: int = 5) -> np.ndarray:
+    """便捷封装: 计算先验并叠加 (搜索内建议用 _tactical_prior + 缓存)"""
+    _apply_tactical_prior(policy, _tactical_prior(board, player, win_condition))
+    return policy
+
+
+def get_forced_move(board: np.ndarray, player: int,
+                    win_condition: int = 5) -> Tuple[Optional[int], Optional[str]]:
+    """
+    战术强制走法（规则短路），优先级：
+      1. 自己立即连五                       → 'win'
+      2. 对手立即连五 → 堵住 (堵不住则尽力)  → 'block_win' / 'block_win_lost'
+      3. 自己能形成活四/双四 (必胜手)        → 'own_fork'
+      4. 对手活三/跳三 → 化解其活四点        → 'block_fork'
+      5. 对手有 ≥2 个活三 → 堵住最多三端     → 'block_live3'
+    返回: (action, reason) 或 (None, None)
+    """
+    h, w = board.shape
+    candidates = _empty_near_stones(board)
+    if not candidates:
+        return None, None
+
+    # 1. 自己立即获胜
+    win_points = _find_win_points(board, player, win_condition, candidates)
+    if win_points:
+        return next(iter(win_points)), 'win'
+
+    opponent = 3 - player
+
+    # 2. 对手立即连五
+    opp_win = _find_win_points(board, opponent, win_condition, candidates)
+    if opp_win:
+        action = _best_win_block(board, player, opp_win, win_condition, candidates)
+        if action is not None:
+            return action, 'block_win'
+        return next(iter(opp_win)), 'block_win_lost'  # 活四/双四堵不住, 尽力而为
+
+    # 3. 自己能形成活四/双四 (强制胜手)
+    own_fork = _find_open_four_moves(board, player, win_condition, candidates)
+    if own_fork:
+        return _pick_own_fork(board, player, own_fork,
+                              win_condition, candidates), 'own_fork'
+
+    # 4. 对手活三/跳三 → 必须化解其活四点
+    opp_fork = _find_open_four_moves(board, opponent, win_condition, candidates)
+    if opp_fork:
+        action = _best_fork_block(board, player, opp_fork,
+                                  win_condition, candidates)
+        if action is not None:
+            return action, 'block_fork'
+
+    # 5. 对手有 ≥2 个活三 → 堵住最多活三端
+    three_lines = _find_live_three_lines(board, opponent)
+    if len(three_lines) >= 2:
+        action = _best_live3_block(board, player, three_lines,
+                                   win_condition, candidates)
+        if action is not None:
+            return action, 'block_live3'
 
     return None, None
 
@@ -341,7 +705,8 @@ class MCTS:
             candidate_radius: 候选点半径 (默认 2 格)
             early_stop_threshold: 最佳动作访问占比超过此值时提前终止
             early_stop_min_sims: 最早在第几次模拟后启用提前终止
-            use_human_knowledge: 是否在搜索树中用人类知识增强 (默认关闭, 保持搜索纯净)
+            use_human_knowledge: 是否在搜索树中用战术知识增强策略先验
+                                 (连五/堵五/活四双四/活三防守, 默认关闭保持搜索纯净)
         """
         self.model = model
         self.device = device
@@ -382,10 +747,17 @@ class MCTS:
         return policy, value
 
     def _get_valid_actions(self, board: np.ndarray) -> np.ndarray:
-        """获取合法动作 (棋盘上为空的位置，且在有棋子周围 radius 格内)"""
+        """获取合法动作 (空位, 且在有棋子周围 radius 格内; 战术关键点不受半径限制)"""
         valid = (board.reshape(-1) == 0)
         if self.use_candidate_mask:
             candidate = get_candidate_mask(board, self.candidate_radius)
+            # 战术增强: 连五点/必堵点即使超出半径也强制纳入候选
+            try:
+                for p in (1, 2):
+                    for a in _win_points_np(board, p, self.win_condition):
+                        candidate[a] = True
+            except Exception:
+                pass
             valid = valid & candidate
             # 如果候选过滤后没有合法动作，fallback 到全部空位
             if not valid.any():
@@ -473,6 +845,11 @@ class MCTS:
 
         # 从棋盘推导当前玩家: P1 先手, 棋子数相等→P1, 否则 P2
         current_player = 1 if (board == 1).sum() == (board == 2).sum() else 2
+        # 战术知识增强: 根节点同样叠加先验, 保证强制走法直接主导根策略
+        if self.use_human_knowledge:
+            _apply_tactical_prior(
+                policy, _tactical_prior(board, current_player, self.win_condition)
+            )
         # 传入 logits, expand 内部做 softmax + 噪声混合
         root.expand(policy, valid_actions, current_player=current_player,
                     add_noise=add_noise,
@@ -483,6 +860,7 @@ class MCTS:
         # 按棋盘内容缓存 _get_valid_actions 结果: 不同路径可能到达相同盘面
         # (同一棋子集合的不同落子顺序), 避免对同一盘面重复计算掩码
         valid_cache: Dict[bytes, np.ndarray] = {}
+        tactics_cache: Dict[bytes, Dict[int, int]] = {}
         for sim in range(self.num_simulations):
             node = root
             sim_board = board.copy()
@@ -515,18 +893,15 @@ class MCTS:
                 sim_state = self._build_state(sim_board, current_player)
                 policy, value = self._evaluate(sim_state)
 
-                # 可选: 人类知识增强 (--mcts_human_knowledge, 默认关闭)
+                # 可选: 战术知识增强 (--mcts_human_knowledge, 默认关闭)
                 if self.use_human_knowledge:
-                    win_action = _find_immediate_win(sim_board, current_player)
-                    if win_action is not None:
-                        policy[win_action] = policy.max() + 10.0
-                    threat_info = _find_opponent_threats(sim_board, current_player,
-                                                         self.win_condition)
-                    for action in threat_info['must_block']:
-                        policy[action] = policy.max() + 10.0
-                    for action in threat_info['threats']:
-                        if policy[action] < policy.max() + 1.0:
-                            policy[action] = max(policy[action], policy.max() + 1.0)
+                    tkey = sim_board.tobytes()
+                    prior = tactics_cache.get(tkey)
+                    if prior is None:
+                        prior = _tactical_prior(sim_board, current_player,
+                                                self.win_condition)
+                        tactics_cache[tkey] = prior
+                    _apply_tactical_prior(policy, prior)
 
                 board_key = sim_board.tobytes()
                 valid = valid_cache.get(board_key)
@@ -631,10 +1006,17 @@ class BatchMCTS:
         return policies, values
 
     def _get_valid_actions(self, board: np.ndarray) -> np.ndarray:
-        """获取合法动作 (棋盘上为空的位置，且在有棋子周围 radius 格内)"""
+        """获取合法动作 (空位, 且在有棋子周围 radius 格内; 战术关键点不受半径限制)"""
         valid = (board.reshape(-1) == 0)
         if self.use_candidate_mask:
             candidate = get_candidate_mask(board, self.candidate_radius)
+            # 战术增强: 连五点/必堵点即使超出半径也强制纳入候选
+            try:
+                for p in (1, 2):
+                    for a in _win_points_np(board, p, self.win_condition):
+                        candidate[a] = True
+            except Exception:
+                pass
             valid = valid & candidate
             if not valid.any():
                 valid = (board.reshape(-1) == 0)
@@ -662,6 +1044,11 @@ class BatchMCTS:
 
         # 从棋盘推导当前玩家: P1 先手, 棋子数相等→P1, 否则 P2
         current_player = 1 if (board == 1).sum() == (board == 2).sum() else 2
+        # 战术知识增强: 根节点同样叠加先验, 保证强制走法直接主导根策略
+        if self.use_human_knowledge:
+            _apply_tactical_prior(
+                policy, _tactical_prior(board, current_player, self.win_condition)
+            )
         # 传入 logits, expand 内部做 softmax + 噪声混合
         root.expand(policy, valid_actions, current_player=current_player,
                     add_noise=add_noise,
@@ -672,6 +1059,7 @@ class BatchMCTS:
         # 同一批模拟会反复选中同一叶子 (相同 sim_board), 掩码计算昂贵,
         # 按棋盘内容缓存 _get_valid_actions 结果, 每个唯一盘面只算一次
         valid_cache: Dict[bytes, np.ndarray] = {}
+        tactics_cache: Dict[bytes, Dict[int, int]] = {}
         while sim_count < self.num_simulations:
             # 收集一批叶子节点
             batch_leaves = []
@@ -728,18 +1116,15 @@ class BatchMCTS:
 
                 for (node, search_path, sim_board, cp), policy, value in \
                         zip(batch_leaves, policies, values):
-                    # 可选: 人类知识增强 (--mcts_human_knowledge, 默认关闭)
+                    # 可选: 战术知识增强 (--mcts_human_knowledge, 默认关闭)
                     if self.use_human_knowledge:
-                        win_action = _find_immediate_win(sim_board, cp)
-                        if win_action is not None:
-                            policy[win_action] = policy.max() + 10.0
-                        threat_info = _find_opponent_threats(sim_board, cp,
-                                                             self.win_condition)
-                        for action in threat_info['must_block']:
-                            policy[action] = policy.max() + 10.0
-                        for action in threat_info['threats']:
-                            if policy[action] < policy.max() + 1.0:
-                                policy[action] = max(policy[action], policy.max() + 1.0)
+                        tkey = sim_board.tobytes()
+                        prior = tactics_cache.get(tkey)
+                        if prior is None:
+                            prior = _tactical_prior(sim_board, cp,
+                                                    self.win_condition)
+                            tactics_cache[tkey] = prior
+                        _apply_tactical_prior(policy, prior)
 
                     board_key = sim_board.tobytes()
                     valid = valid_cache.get(board_key)
