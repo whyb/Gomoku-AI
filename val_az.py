@@ -16,6 +16,7 @@ AlphaZero 模型验证脚本 — 适配 model_alphazero.py
 随机性说明:
   - 模型前向推理是确定性的 (固定权重 + eval 模式)
   - 模型落子前先走战术守卫 (与 webdemo 一致): 必赢/必堵/活四双四/活三防守直接短路
+  - 无强制走法时对 NN logits 叠加 +10/+8 软战术先验再贪心 (与 webdemo / --mcts_human_knowledge 一致)
   - --epsilon 控制模型落子的随机探索率: 0=纯贪心(推荐评估), >0 时每步
     以该概率随机落子 (会明显拉低胜率)
   - --seed 固定随机种子后, 每局结果可完全复现
@@ -35,7 +36,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 
 from model import Gomoku, get_valid_action
 from model_alphazero import GomokuNetAlphaZero, GomokuNetAlphaZeroSmall
-from mcts import get_forced_move
+from mcts import get_forced_move, _tactical_prior, _apply_tactical_prior
 from config import Config, update_config_from_cli
 
 
@@ -144,6 +145,14 @@ def play_round(board_size, win_condition, model_state_dict,
                 else:
                     with torch.no_grad():
                         logits, _ = model(state_tensor)
+                    # 软战术先验: 无强制走法时对 NN logits 叠加 +10/+8
+                    # (与 webdemo 的 aiLogic / --mcts_human_knowledge 的 _apply_tactical_prior 一致)
+                    logits_np = logits.detach().cpu().numpy().reshape(-1)
+                    _apply_tactical_prior(
+                        logits_np,
+                        _tactical_prior(env.board, env.current_player, win_condition)
+                    )
+                    logits = torch.from_numpy(logits_np)
                     board_flat = torch.tensor(env.board.flatten())
                     action = get_valid_action(logits, board_flat, board_size,
                                               epsilon=epsilon)
