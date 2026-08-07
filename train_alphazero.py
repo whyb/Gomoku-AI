@@ -1549,10 +1549,10 @@ def main():
                         help='棋盘大小 (默认 10)')
     parser.add_argument('--win_condition', type=int, default=5,
                         help='连子数 (默认 5)')
-    parser.add_argument('--num_simulations', type=int, default=200,
-                        help='MCTS 模拟次数 (默认 200)')
-    parser.add_argument('--mcts_batch_size', type=int, default=256,
-                        help='MCTS 批量推理大小 (默认 256)')
+    parser.add_argument('--num_simulations', type=int, default=400,
+                        help='MCTS 模拟次数 (默认 400)')
+    parser.add_argument('--mcts_batch_size', type=int, default=512,
+                        help='MCTS 批量推理大小 (默认 512)')
     parser.add_argument('--learning_rate', type=float, default=2e-3,
                         help='初始学习率 (默认 2e-3)')
     parser.add_argument('--lr_min', type=float, default=1e-5,
@@ -1565,7 +1565,7 @@ def main():
                         help='最大对局数 (默认 100000)')
     parser.add_argument('--batch_size', type=int, default=1024,
                         help='训练 batch 大小 (默认 1024, 基准测试最优)')
-    parser.add_argument('--model', type=str, default='small',
+    parser.add_argument('--model', type=str, default='standard',
                         choices=['small', 'standard'],
                         help='模型大小: small(6层/64ch,快) 或 standard(10层/128ch,强)')
     parser.add_argument('--fp16', action='store_true',
