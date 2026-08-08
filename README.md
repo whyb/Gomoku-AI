@@ -95,6 +95,21 @@ python train_alphazero.py --board_size 15 --num_simulations 400 --model small --
 
 ```
 
+### 训练可视化（TensorBoard）
+
+`train_alphazero.py` 默认开启 TensorBoard 日志记录（蒸馏阶段与 MCTS 自博弈阶段均支持），训练过程中会将 loss、Top-K 准确率、Elo 评分、吞吐速度等指标写入 `runs/` 目录：
+
+```shell
+tensorboard --logdir runs
+```
+
+浏览器打开 `http://localhost:6006` 即可查看训练曲线。
+
+常用参数：
+
+- `--log_dir`：日志目录（默认 `runs`）
+- `--no_tensorboard`：禁用日志记录
+
 ### 两阶段训练（推荐）
 
 直接从随机初始化开始 MCTS 强化学习收敛很慢（RL 稀疏奖励），本项目采用**两阶段训练**：先用传统 AI 教师快速"模仿大师"（知识蒸馏），再通过自博弈"超越教师"（MCTS 微调）：
