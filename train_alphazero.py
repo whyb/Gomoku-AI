@@ -40,6 +40,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.multiprocessing as mp
 from torch.amp import autocast, GradScaler
+from torch.utils.tensorboard import SummaryWriter
 
 # 添加项目路径
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -421,6 +422,10 @@ def train_distill(args):
     checkpoint_path = f'{prefix}_distill_checkpoint.pth'
     buffer_path = f'{prefix}_distill_buffer.npz'
 
+    # --- TensorBoard ---
+    writer = None if args.no_tensorboard else SummaryWriter(
+        log_dir=os.path.join(args.log_dir, f'{prefix}_distill'))
+
     # --- 优化器 + AMP + LR ---
     optimizer = torch.optim.Adam(
         model.parameters(),
@@ -599,6 +604,12 @@ def train_distill(args):
                 recent_p_losses.append(p_loss)
                 recent_v_losses.append(v_loss)
 
+                if writer is not None:
+                    writer.add_scalar('distill/loss', loss, update_step)
+                    writer.add_scalar('distill/policy_loss', p_loss, update_step)
+                    writer.add_scalar('distill/value_loss', v_loss, update_step)
+                    writer.add_scalar('distill/lr', optimizer.param_groups[0]['lr'], update_step)
+
                 # --- 步数触发保存 ---
                 if update_step % DISTILL_SAVE_STEPS == 0:
                     t_save = time.time()
@@ -703,6 +714,16 @@ def train_distill(args):
                       f"Total={elapsed/60:.1f}min")
                 print("-" * 100)
 
+                if writer is not None:
+                    writer.add_scalar('distill/top1', acc['top1'], update_step)
+                    writer.add_scalar('distill/top3', acc['top3'], update_step)
+                    writer.add_scalar('distill/top5', acc['top5'], update_step)
+                    writer.add_scalar('distill/games_generated', games_generated, update_step)
+                    writer.add_scalar('distill/games_per_sec', games_per_sec, update_step)
+                    writer.add_scalar('distill/samples_per_sec', samples_per_sec, update_step)
+                    writer.add_scalar('distill/steps_per_sec', steps_per_sec, update_step)
+                    writer.add_scalar('distill/buffer_size', len(replay_buffer), update_step)
+
                 # --- 提前收敛 (数据全部生成后) ---
                 if games_generated >= total_games_target:
                     if acc['top1'] >= 0.85 and acc['top3'] >= 0.95:
@@ -717,6 +738,8 @@ def train_distill(args):
                         best_top1 = acc['top1']
                         patience_counter = 0
                         torch.save(model.state_dict(), best_model_path)
+                        if writer is not None:
+                            writer.add_scalar('distill/best_top1', best_top1, update_step)
                     else:
                         patience_counter += 1
 
@@ -752,6 +775,8 @@ def train_distill(args):
                     best_top1 = acc['top1']
                     patience_counter = 0
                     torch.save(model.state_dict(), best_model_path)
+                    if writer is not None:
+                        writer.add_scalar('distill/best_top1', best_top1, update_step)
                 else:
                     patience_counter += 1
 
@@ -814,6 +839,17 @@ def train_distill(args):
                           f"Total={elapsed/60:.1f}min")
                     print("-" * 100)
 
+                    if writer is not None:
+                        writer.add_scalar('distill/loss', avg_loss, update_step)
+                        writer.add_scalar('distill/policy_loss', avg_p, update_step)
+                        writer.add_scalar('distill/value_loss', avg_v, update_step)
+                        writer.add_scalar('distill/lr', lr, update_step)
+                        writer.add_scalar('distill/top1', acc['top1'], update_step)
+                        writer.add_scalar('distill/top3', acc['top3'], update_step)
+                        writer.add_scalar('distill/top5', acc['top5'], update_step)
+                        writer.add_scalar('distill/steps_per_sec', steps_per_sec, update_step)
+                        writer.add_scalar('distill/buffer_size', len(replay_buffer), update_step)
+
                     if acc['top1'] >= 0.85 and acc['top3'] >= 0.95:
                         print(f"  [收敛] Top-1={acc['top1']:.2%}, "
                               f"Top-3={acc['top3']:.2%} — 训练完成")
@@ -826,6 +862,8 @@ def train_distill(args):
                         best_top1 = acc['top1']
                         patience_counter = 0
                         torch.save(model.state_dict(), best_model_path)
+                        if writer is not None:
+                            writer.add_scalar('distill/best_top1', best_top1, update_step)
                     else:
                         patience_counter += 1
 
@@ -878,6 +916,8 @@ def train_distill(args):
         print(f"Checkpoint → {checkpoint_path}")
         print(f"权重       → {distill_model_path}")
         print(f"训练数据   → {buffer_path}")
+        if writer is not None:
+            writer.close()
 
     # --- 最终评估 ---
     model.eval()
@@ -943,6 +983,10 @@ def train(args):
     checkpoint_path = f'{prefix}_checkpoint.pth'
     distill_model_path = f'{prefix}_distill.pth'         # 蒸馏最终权重
     distill_best_path = f'{prefix}_distill_best.pth'     # 蒸馏最佳权重 (优先)
+
+    # --- TensorBoard ---
+    writer = None if args.no_tensorboard else SummaryWriter(
+        log_dir=os.path.join(args.log_dir, prefix))
 
     # ============================================================
     # 加载 checkpoint (完整恢复训练状态)
@@ -1371,6 +1415,11 @@ def train(args):
                   f"后手={result['p1_second_win_rate']:.1%}) | "
                   f"评估耗时 {eval_time:.1f}s")
 
+            if writer is not None:
+                writer.add_scalar('mcts/eval_win_rate', result['p1_win_rate'], update_step)
+                writer.add_scalar('mcts/eval_win_rate_first', result['p1_first_win_rate'], update_step)
+                writer.add_scalar('mcts/eval_win_rate_second', result['p1_second_win_rate'], update_step)
+
             # 更新 Elo
             for _ in range(10):
                 if result['p1_win_rate'] > 0.5:
@@ -1393,6 +1442,8 @@ def train(args):
                 mcts_patience = 0
                 torch.save(model.state_dict(), best_model_path)
                 print(f"  [保存] 最佳模型 → {best_model_path}")
+                if writer is not None:
+                    writer.add_scalar('mcts/best_elo', best_elo, update_step)
             else:
                 mcts_patience += 1
 
@@ -1476,6 +1527,20 @@ def train(args):
                   f"Total={elapsed/60:.1f}min")
             print("-" * 100)
 
+            if writer is not None:
+                writer.add_scalar('mcts/loss', avg_loss, update_step)
+                writer.add_scalar('mcts/policy_loss', avg_p_loss, update_step)
+                writer.add_scalar('mcts/value_loss', avg_v_loss, update_step)
+                writer.add_scalar('mcts/lr', lr, update_step)
+                writer.add_scalar('mcts/elo', elo_current, update_step)
+                writer.add_scalar('mcts/buffer_size', buffer_size, update_step)
+                writer.add_scalar('mcts/pool_size', pool_size, update_step)
+                writer.add_scalar('mcts/games_per_sec', games_per_sec, update_step)
+                writer.add_scalar('mcts/samples_per_sec', samples_per_sec, update_step)
+                writer.add_scalar('mcts/steps_per_sec', steps_per_sec, update_step)
+                writer.add_scalar('mcts/sims_per_sec', sims_per_sec, update_step)
+                writer.add_scalar('mcts/gpu_mem_mb', gpu_mem_used, update_step)
+
     # ============================================================
     # 清理
     # ============================================================
@@ -1542,6 +1607,9 @@ def train(args):
     if device == 'cuda':
         print(f"峰值 GPU 内存: {torch.cuda.max_memory_allocated()/1024**2:.0f} MB")
 
+    if writer is not None:
+        writer.close()
+
 
 def main():
     parser = argparse.ArgumentParser(description='AlphaZero Gomoku 训练')
@@ -1578,6 +1646,10 @@ def main():
                              '默认关闭; 胜点检测已向量化+缓存, 开销远小于逐叶扫描')
     parser.add_argument('--save_interval_hours', type=float, default=1.0,
                         help='自动保存间隔 (小时, 默认 1.0, 设为 0 禁用)')
+    parser.add_argument('--log_dir', type=str, default='runs',
+                        help='TensorBoard 日志目录 (默认 runs)')
+    parser.add_argument('--no_tensorboard', action='store_true',
+                        help='禁用 TensorBoard 日志记录 (默认开启)')
 
     # ============================================================
     # 知识蒸馏参数 (--distill 启用时生效)
