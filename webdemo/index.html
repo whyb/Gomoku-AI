@@ -93,6 +93,28 @@
             .piece-black { background: radial-gradient(circle at 30% 30%, #444, #000); }
             .piece-white { background: radial-gradient(circle at 30% 30%, #fff, #ccc); }
             .piece-visible { @apply scale-100; }
+
+            /* 落子顺序数字: 居中显示在棋子上, 黑子白字 / 白子黑字 */
+            .move-number {
+                position: absolute;
+                inset: 0;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-weight: 800;
+                line-height: 1;
+                pointer-events: none;
+                user-select: none;
+                -webkit-user-select: none;
+            }
+            .move-number.on-black {
+                color: #ffffff;
+                text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+            }
+            .move-number.on-white {
+                color: #1a1a1a;
+                text-shadow: 0 1px 1px rgba(255, 255, 255, 0.55);
+            }
             
             .last-move-cursor {
                 @apply absolute inset-0 border-2 border-red-400/60 rounded-sm pointer-events-none z-20;
@@ -187,6 +209,10 @@
                 <label class="flex items-center cursor-pointer gap-2">
                     <input type="checkbox" id="hintEnabled" class="w-5 h-5 sm:w-4 sm:h-4 rounded border-gray-300 text-secondary focus:ring-secondary">
                     <span class="text-xs sm:text-[11px] font-medium">落子提示</span>
+                </label>
+                <label class="flex items-center cursor-pointer gap-2">
+                    <input type="checkbox" id="moveOrder" class="w-5 h-5 sm:w-4 sm:h-4 rounded border-gray-300 text-secondary focus:ring-secondary" checked>
+                    <span class="text-xs sm:text-[11px] font-medium">落子顺序</span>
                 </label>
                 <div class="h-4 w-px bg-gray-300 mx-1 hidden sm:block"></div>
                 <button id="undo" class="bg-amber-100 text-amber-800 border border-amber-500 text-xs sm:text-[11px] px-3.5 py-2 sm:px-3 sm:py-1.5 rounded-lg hover:bg-amber-500 hover:text-white transition-colors shadow-sm whitespace-nowrap">
@@ -468,8 +494,38 @@
             points[index + 1].appendChild(piece);
 
             markLastMove(index);
+            refreshMoveNumbers();
             
             requestAnimationFrame(() => piece.classList.add('piece-visible'));
+        }
+
+        // 落子顺序: 在每个棋子上显示第几手 (1,2,3...), 黑子白字 / 白子黑字
+        // 字号按当前格子大小计算, 三位数也能完整落在棋子内
+        function refreshMoveNumbers() {
+            const checkbox = document.getElementById('moveOrder');
+            const show = checkbox && checkbox.checked;
+            const wrapper = document.getElementById('boardWrapper');
+            const points = document.getElementById('board').children;
+            const cell = wrapper ? wrapper.clientWidth / boardSize : 0;
+            for (let i = 0; i < boardSquare; i++) {
+                const point = points[i + 1];
+                if (!point) continue;
+                const old = point.querySelector('.move-number');
+                if (old) old.remove();
+                if (!show || gameState.board[i] === 0) continue;
+                const moveNo = gameState.moveHistory.findIndex(m => m.index === i) + 1;
+                if (moveNo <= 0) continue;
+                const piece = point.querySelector('.piece');
+                if (!piece) continue;
+                const digits = String(moveNo).length;
+                let fontPx = cell ? cell * (digits <= 1 ? 0.42 : digits === 2 ? 0.36 : 0.30) : 12;
+                fontPx = Math.max(8, Math.min(fontPx, 26));
+                const num = document.createElement('span');
+                num.className = `move-number ${gameState.board[i] === 1 ? 'on-black' : 'on-white'}`;
+                num.textContent = moveNo;
+                num.style.fontSize = `${fontPx}px`;
+                piece.appendChild(num);
+            }
         }
 
         function markLastMove(index) {
@@ -853,6 +909,7 @@
                 gameState.moveHistory[gameState.moveHistory.length - 1].player === gameState.humanPlayer) {
                 popMove();
             }
+            refreshMoveNumbers();
 
             gameState.gameOver = false;
             document.getElementById('resultModal').classList.add('hidden');
@@ -999,6 +1056,7 @@
             drawGrid();
             initInteractions();
             drawCoordinates();
+            refreshMoveNumbers();
             try {
                 gameState.model = await ort.InferenceSession.create('model_bs15_win5.onnx');
                 document.getElementById('loading').classList.add('hidden');
@@ -1069,9 +1127,10 @@
                 clearHints();
             }
         };
+        document.getElementById('moveOrder').onchange = refreshMoveNumbers;
         
         // 窗口尺寸变化 (旋转/缩放) 时重新对齐坐标
-        window.addEventListener('resize', drawCoordinates);
+        window.addEventListener('resize', () => { drawCoordinates(); refreshMoveNumbers(); });
         window.onload = init;
     </script>
 </body>
