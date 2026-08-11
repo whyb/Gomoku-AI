@@ -100,6 +100,23 @@
                 animation: pulse-border 1.5s infinite;
             }
 
+            /* 坐标标识层: 与落子点网格共用同一几何, 不拦截点击 */
+            .coordinates-layer {
+                @apply absolute inset-0;
+                pointer-events: none;
+                z-index: 25;
+            }
+            .coord-label {
+                position: absolute;
+                transform: translate(-50%, -50%);
+                font-weight: 700;
+                color: rgba(101, 70, 45, 0.9);
+                line-height: 1;
+                user-select: none;
+                -webkit-user-select: none;
+                text-shadow: 0 0 3px rgba(255, 244, 224, 0.55);
+            }
+
             /* 移动端交互优化: 消除点击高亮闪烁与 300ms 双击缩放延迟 */
             button, select, input[type="checkbox"], label, .intersect-point {
                 touch-action: manipulation;
@@ -186,9 +203,10 @@
         </div>
     </div>
 
-    <div class="board-wrapper">
+    <div id="boardWrapper" class="board-wrapper">
         <div id="grid-bg" class="grid-container"></div>
         <div id="board" class="interaction-layer"></div>
+        <div id="coordinates" class="coordinates-layer"></div>
     </div>
 
     <div id="resultModal" class="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-6 hidden">
@@ -271,6 +289,45 @@
                 point.addEventListener('mouseover', () => showHoverCorners(i));
                 point.addEventListener('mouseout', clearHoverCorners);
                 board.appendChild(point);
+            }
+        }
+
+        // 棋盘坐标: 底下列字母 A..(按棋盘大小截取), 两侧行号 1..(1 在底部, 从下往上递增)
+        // 坐标与交叉线严格对齐: 交互层每个格子中心 = 一条交叉线, 边缘留白中心 = 坐标显示位
+        function drawCoordinates() {
+            const layer = document.getElementById('coordinates');
+            const wrapper = document.getElementById('boardWrapper');
+            if (!layer || !wrapper) return;
+            layer.innerHTML = '';
+            const B = boardSize;
+            const cell = wrapper.clientWidth / B;
+            if (!cell || !isFinite(cell)) return;
+            const fontPx = Math.max(9, Math.min(cell * 0.36, 20));
+            const xIn = 100 / (4 * B);   // 左右留白中心 (占棋盘宽度的百分比)
+            const yBottom = 100 - xIn;   // 底部留白中心 (占棋盘高度的百分比)
+
+            // 横向列: A 到 O (非 15 路棋盘按实际大小截取), 显示在棋盘最底部
+            for (let c = 0; c < B; c++) {
+                const label = document.createElement('span');
+                label.className = 'coord-label';
+                label.textContent = String.fromCharCode(65 + c);
+                label.style.left = `${((c + 0.5) / B) * 100}%`;
+                label.style.top = `${yBottom}%`;
+                label.style.fontSize = `${fontPx}px`;
+                layer.appendChild(label);
+            }
+
+            // 纵向行: 1 在最下方, B 在最上方, 左右两侧各一份
+            for (let r = 0; r < B; r++) {
+                for (const side of ['left', 'right']) {
+                    const label = document.createElement('span');
+                    label.className = 'coord-label';
+                    label.textContent = B - r;
+                    label.style.left = side === 'left' ? `${xIn}%` : `${100 - xIn}%`;
+                    label.style.top = `${((r + 0.5) / B) * 100}%`;
+                    label.style.fontSize = `${fontPx}px`;
+                    layer.appendChild(label);
+                }
             }
         }
 
@@ -941,6 +998,7 @@
         async function init() {
             drawGrid();
             initInteractions();
+            drawCoordinates();
             try {
                 gameState.model = await ort.InferenceSession.create('model_bs15_win5.onnx');
                 document.getElementById('loading').classList.add('hidden');
@@ -987,6 +1045,7 @@
             document.getElementById('status').classList.add('animate-pulse');
             drawGrid();
             initInteractions();
+            drawCoordinates();
 
             if (aiFirst) {
                 gameState.isAIMoving = true;
@@ -1011,6 +1070,8 @@
             }
         };
         
+        // 窗口尺寸变化 (旋转/缩放) 时重新对齐坐标
+        window.addEventListener('resize', drawCoordinates);
         window.onload = init;
     </script>
 </body>
