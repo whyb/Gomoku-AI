@@ -52,7 +52,11 @@ class SelfPlayWorker:
                  board_size: int = 10, win_condition: int = 5,
                  num_simulations: int = 400, c_puct: float = 1.5,
                  dirichlet_alpha: float = 0.3,
+                 dirichlet_epsilon: float = 0.25,
                  temp_threshold: int = 30,
+                 temp_final: float = 0.1,
+                 draw_reward: float = 0.0,
+                 random_open_moves: int = 0,
                  use_batch_mcts: bool = True,
                  mcts_batch_size: int = 16,
                  fp16: bool = False,
@@ -66,7 +70,12 @@ class SelfPlayWorker:
             num_simulations: MCTS 模拟次数
             c_puct: PUCT 探索常数
             dirichlet_alpha: Dirichlet 噪声 alpha
-            temp_threshold: 温度退火阈值 (前 N 步 τ=1.0, 之后 τ=0.1)
+            dirichlet_epsilon: Dirichlet 噪声混合比例
+            temp_threshold: 温度退火阈值 (前 N 步 τ=1.0)
+            temp_final: 阈值后的温度 (越大越随机, 默认 0.1)
+            draw_reward: 平局的价值目标 (默认 0.0; 设为负值可让模型厌恶平局、
+                         主动求胜, 防止价值头坍缩到 0)
+            random_open_moves: 每局随机开局 N 手 (制造不平衡局面, 增加胜负样本)
             use_batch_mcts: 是否使用批量 MCTS
             mcts_batch_size: 批量 MCTS 的 batch 大小
             fp16: MCTS 推理是否使用 FP16 混合精度
@@ -77,6 +86,9 @@ class SelfPlayWorker:
         self.board_size = board_size
         self.win_condition = win_condition
         self.temp_threshold = temp_threshold
+        self.temp_final = temp_final
+        self.draw_reward = draw_reward
+        self.random_open_moves = random_open_moves
 
         if use_batch_mcts:
             self.mcts = BatchMCTS(
@@ -84,6 +96,7 @@ class SelfPlayWorker:
                 num_simulations=num_simulations,
                 c_puct=c_puct,
                 dirichlet_alpha=dirichlet_alpha,
+                dirichlet_epsilon=dirichlet_epsilon,
                 batch_size=mcts_batch_size,
                 fp16=fp16,
                 win_condition=win_condition,
@@ -95,6 +108,7 @@ class SelfPlayWorker:
                 num_simulations=num_simulations,
                 c_puct=c_puct,
                 dirichlet_alpha=dirichlet_alpha,
+                dirichlet_epsilon=dirichlet_epsilon,
                 fp16=fp16,
                 win_condition=win_condition,
                 use_human_knowledge=use_human_knowledge
@@ -115,6 +129,10 @@ class SelfPlayWorker:
         board = np.zeros((self.board_size, self.board_size), dtype=np.int32)
         steps: List[GameStep] = []
 
+        # 随机开局: 若未显式指定开局且启用了随机开局, 生成 N 个不重复的随机落子
+        if opening_moves is None:
+            opening_moves = self._random_opening()
+
         # 应用开局
         start_step = 0
         if opening_moves:
@@ -131,8 +149,8 @@ class SelfPlayWorker:
             # 构建状态
             state = self._build_state(board, current_player)
 
-            # 温度退火
-            temperature = 1.0 if step < self.temp_threshold else 0.1
+            # 温度退火 (temp_final 可调, 越大中后盘越随机)
+            temperature = 1.0 if step < self.temp_threshold else self.temp_final
 
             # 先手第一手完全均匀随机落子 (不固定天元); 第二手起走 MCTS
             if not board.any():
@@ -211,7 +229,7 @@ class SelfPlayWorker:
         for step in game_result.steps:
             # 价值: 从当前玩家视角
             if winner == 0:
-                z = 0.0  # 平局
+                z = self.draw_reward  # 平局 (默认 0; 可设为负值厌恶平局)
             elif winner == step.player:
                 z = 1.0  # 赢了
             else:
@@ -256,6 +274,29 @@ class SelfPlayWorker:
                 return True
         return False
 
+    def _has_five(self, opening_moves: List[Tuple[int, int]]) -> bool:
+        """检查随机开局是否已出现连五 (理论概率极低, 防御性检查)"""
+        board = np.zeros((self.board_size, self.board_size), dtype=np.int32)
+        for i, (x, y) in enumerate(opening_moves):
+            board[x, y] = 1 if i % 2 == 0 else 2
+            if self._check_win(board, x, y):
+                return True
+        return False
+
+    def _random_opening(self) -> Optional[List[Tuple[int, int]]]:
+        """生成随机开局落子 (无重复, 且不出现连五); 未启用时返回 None"""
+        if self.random_open_moves <= 0:
+            return None
+        total_cells = self.board_size * self.board_size
+        n_moves = min(self.random_open_moves, total_cells)
+        for _ in range(8):  # 防御性重试, 避免随机出五连
+            picked = np.random.choice(total_cells, size=n_moves, replace=False)
+            opening = [(int(c) // self.board_size, int(c) % self.board_size)
+                       for c in picked]
+            if not self._has_five(opening):
+                return opening
+        return opening
+
 
 class SelfPlayManager:
     """
@@ -276,7 +317,14 @@ class SelfPlayManager:
                  mcts_batch_size: int = 16,
                  cpu_workers: int = 0,
                  fp16: bool = False,
-                 use_human_knowledge: bool = False):
+                 use_human_knowledge: bool = False,
+                 c_puct: float = 1.5,
+                 dirichlet_alpha: float = 0.3,
+                 dirichlet_epsilon: float = 0.25,
+                 temp_threshold: int = 30,
+                 temp_final: float = 0.1,
+                 draw_reward: float = 0.0,
+                 random_open_moves: int = 0):
         """
         Args:
             model: 当前训练的模型
@@ -290,6 +338,9 @@ class SelfPlayManager:
             cpu_workers: CPU 并行 worker 数 (0=串行GPU模式, >0=多进程CPU模式)
             fp16: MCTS 推理是否使用 FP16 混合精度
             use_human_knowledge: 是否在搜索树中用人类知识增强 (默认关闭)
+            c_puct / dirichlet_alpha / dirichlet_epsilon / temp_threshold /
+            temp_final / draw_reward / random_open_moves: 探索与奖励参数,
+            透传给 SelfPlayWorker (详见其 docstring)
         """
         self.model = model
         self.device = device
@@ -302,6 +353,15 @@ class SelfPlayManager:
         self.opponent_pool = opponent_pool
         self.game_count = 0
         self.use_human_knowledge = use_human_knowledge
+        self.c_puct = c_puct
+        self.dirichlet_alpha = dirichlet_alpha
+        self.dirichlet_epsilon = dirichlet_epsilon
+        self.temp_threshold = temp_threshold
+        self.temp_final = temp_final
+        self.draw_reward = draw_reward
+        self.random_open_moves = random_open_moves
+        self._iter_games = []   # 本轮生成的每局结果 (winner, main_player)
+        self.last_stats = None  # 最近一轮 generate_games 的对局统计
         self._opponent_worker_cache = {}  # model_id → SelfPlayWorker 缓存
 
         self.worker = SelfPlayWorker(
@@ -309,7 +369,14 @@ class SelfPlayManager:
             num_simulations=num_simulations,
             mcts_batch_size=mcts_batch_size,
             fp16=fp16,
-            use_human_knowledge=use_human_knowledge
+            use_human_knowledge=use_human_knowledge,
+            c_puct=c_puct,
+            dirichlet_alpha=dirichlet_alpha,
+            dirichlet_epsilon=dirichlet_epsilon,
+            temp_threshold=temp_threshold,
+            temp_final=temp_final,
+            draw_reward=draw_reward,
+            random_open_moves=random_open_moves,
         )
 
     def update_model(self, model: nn.Module):
@@ -324,9 +391,70 @@ class SelfPlayManager:
         当 cpu_workers > 0 时使用多进程并行 (CPU workers)
         否则使用串行 GPU 模式
         """
+        self._iter_games = []
         if self.cpu_workers > 0 and self.model_class is not None:
-            return self._generate_games_parallel(num_games)
-        return self._generate_games_sequential(num_games)
+            data = self._generate_games_parallel(num_games)
+        else:
+            data = self._generate_games_sequential(num_games)
+        self._compute_stats(num_games)
+        return data
+
+    def _record_game(self, winner: int, main_player: int):
+        """记录一局结果用于 TensorBoard 统计"""
+        self._iter_games.append((winner, main_player))
+
+    def _compute_stats(self, num_games: int) -> dict:
+        """
+        汇总本轮对局统计, 存入 self.last_stats 供 TensorBoard 使用:
+          - tie_rate:              平局占比 (全部对局)
+          - selfplay_win_rate:     自博弈局黑方(P1)胜率 (双方同模型, 正常≈50%)
+          - main_first_win_rate:   主模型执黑(先手)胜率 (自博弈记黑方, 对手局按 main_player)
+          - main_second_win_rate:  主模型执白(后手)胜率
+        """
+        games = self._iter_games[:num_games]
+        n = len(games)
+        stats = {
+            'games': n, 'ties': 0,
+            'selfplay_games': 0, 'selfplay_p1_wins': 0,
+            'main_first_games': 0, 'main_first_wins': 0,
+            'main_second_games': 0, 'main_second_wins': 0,
+        }
+        for winner, main_player in games:
+            if winner == 0:
+                stats['ties'] += 1
+            if main_player == 0:
+                # 自博弈: 主模型同时执双方, 黑方=先手, 白方=后手
+                stats['selfplay_games'] += 1
+                if winner == 1:
+                    stats['selfplay_p1_wins'] += 1
+                stats['main_first_games'] += 1
+                stats['main_second_games'] += 1
+                if winner == 1:
+                    stats['main_first_wins'] += 1
+                elif winner == 2:
+                    stats['main_second_wins'] += 1
+            elif main_player == 1:
+                stats['main_first_games'] += 1
+                if winner == 1:
+                    stats['main_first_wins'] += 1
+            elif main_player == 2:
+                stats['main_second_games'] += 1
+                if winner == 2:
+                    stats['main_second_wins'] += 1
+
+        def rate(wins, total):
+            return wins / total if total else 0.0
+
+        stats['tie_rate'] = stats['ties'] / n if n else 0.0
+        stats['selfplay_win_rate'] = rate(
+            stats['selfplay_p1_wins'], stats['selfplay_games'])
+        stats['main_first_win_rate'] = rate(
+            stats['main_first_wins'], stats['main_first_games'])
+        stats['main_second_win_rate'] = rate(
+            stats['main_second_wins'], stats['main_second_games'])
+        self._iter_games = []
+        self.last_stats = stats
+        return stats
 
     def _generate_games_sequential(self, num_games: int
                                    ) -> List[Tuple[np.ndarray, np.ndarray, float]]:
@@ -344,6 +472,7 @@ class SelfPlayManager:
             else:
                 game_result = self.worker.play_one_game(game_id=self.game_count)
                 opponent_type = 'self'
+            self._record_game(game_result.winner, game_result.main_player)
 
             game_time = time.time() - game_start
             self.game_count += 1
@@ -408,6 +537,13 @@ class SelfPlayManager:
                 'num_games': 1,
                 'opponent_state_dict': opp_dict,
                 'use_human_knowledge': self.use_human_knowledge,
+                'c_puct': self.c_puct,
+                'dirichlet_alpha': self.dirichlet_alpha,
+                'dirichlet_epsilon': self.dirichlet_epsilon,
+                'temp_threshold': self.temp_threshold,
+                'temp_final': self.temp_final,
+                'draw_reward': self.draw_reward,
+                'random_open_moves': self.random_open_moves,
             })
 
         # 并行执行
@@ -420,8 +556,10 @@ class SelfPlayManager:
 
             for future in as_completed(futures):
                 try:
-                    data = future.result()
+                    data, results = future.result()
                     all_data.extend(data)
+                    for winner, main_player in results:
+                        self._record_game(winner, main_player)
                     completed_games += 1
                     if completed_games % 5 == 0:
                         print(f"    [Parallel] {completed_games}/{num_games} games done, "
@@ -494,19 +632,39 @@ class SelfPlayManager:
                 num_simulations=self.worker.mcts.num_simulations,
                 mcts_batch_size=self.worker.mcts.batch_size,
                 fp16=self.fp16,
-                use_human_knowledge=self.use_human_knowledge
+                use_human_knowledge=self.use_human_knowledge,
+                c_puct=self.c_puct,
+                dirichlet_alpha=self.dirichlet_alpha,
+                dirichlet_epsilon=self.dirichlet_epsilon,
+                temp_threshold=self.temp_threshold,
+                temp_final=self.temp_final,
+                draw_reward=self.draw_reward,
+                random_open_moves=self.random_open_moves,
             )
         opponent_worker = self._opponent_worker_cache[cache_key]
 
         board = np.zeros((self.board_size, self.board_size), dtype=np.int32)
         steps = []
+
+        # 随机开局 (与 play_one_game 一致)
+        opening_moves = self.worker._random_opening()
+        start_step = 0
+        if opening_moves:
+            for i, (x, y) in enumerate(opening_moves):
+                player = 1 if i % 2 == 0 else 2
+                board[x, y] = player
+            start_step = len(opening_moves)
+
         current_player = 1
+        if start_step % 2 == 1:
+            current_player = 2
         max_steps = self.board_size * self.board_size
         winner = 0
 
-        for step in range(max_steps):
+        for step in range(start_step, max_steps):
             state = self.worker._build_state(board, current_player)
-            temperature = 1.0 if step < self.worker.temp_threshold else 0.1
+            temperature = (1.0 if step < self.worker.temp_threshold
+                           else self.worker.temp_final)
 
             # 先手第一手完全均匀随机落子 (不固定天元); 第二手起走 MCTS
             if not board.any():
@@ -594,15 +752,30 @@ def _cpu_self_play_worker(config: dict) -> list:
     model.eval()
 
     use_human_knowledge = config.get('use_human_knowledge', False)
+    c_puct = config.get('c_puct', 1.5)
+    dirichlet_alpha = config.get('dirichlet_alpha', 0.3)
+    dirichlet_epsilon = config.get('dirichlet_epsilon', 0.25)
+    temp_threshold = config.get('temp_threshold', 30)
+    temp_final = config.get('temp_final', 0.1)
+    draw_reward = config.get('draw_reward', 0.0)
+    random_open_moves = config.get('random_open_moves', 0)
 
     worker = SelfPlayWorker(
         model, device, board_size, win_condition,
         num_simulations=num_simulations,
         mcts_batch_size=mcts_batch_size,
-        use_human_knowledge=use_human_knowledge
+        use_human_knowledge=use_human_knowledge,
+        c_puct=c_puct,
+        dirichlet_alpha=dirichlet_alpha,
+        dirichlet_epsilon=dirichlet_epsilon,
+        temp_threshold=temp_threshold,
+        temp_final=temp_final,
+        draw_reward=draw_reward,
+        random_open_moves=random_open_moves,
     )
 
     all_data = []
+    results = []  # [(winner, main_player), ...] 供 TensorBoard 统计
     for i in range(config.get('num_games', 1)):
         game_id = config['game_id'] + i
 
@@ -620,7 +793,14 @@ def _cpu_self_play_worker(config: dict) -> list:
                 opp_model, device, board_size, win_condition,
                 num_simulations=num_simulations,
                 mcts_batch_size=mcts_batch_size,
-                use_human_knowledge=use_human_knowledge
+                use_human_knowledge=use_human_knowledge,
+                c_puct=c_puct,
+                dirichlet_alpha=dirichlet_alpha,
+                dirichlet_epsilon=dirichlet_epsilon,
+                temp_threshold=temp_threshold,
+                temp_final=temp_final,
+                draw_reward=draw_reward,
+                random_open_moves=random_open_moves,
             )
 
             # Run opponent game
@@ -629,12 +809,13 @@ def _cpu_self_play_worker(config: dict) -> list:
             )
         else:
             game_result = worker.play_one_game(game_id=game_id)
+        results.append((game_result.winner, game_result.main_player))
 
         # 转换为训练数据 (不做对称增强)
         data = worker.generate_training_data(game_result, augment_symmetry=False)
         all_data.extend(data)
 
-    return all_data
+    return all_data, results
 
 
 def _run_opponent_game(worker1, worker2, board_size, win_condition, game_id):
@@ -648,13 +829,24 @@ def _run_opponent_game(worker1, worker2, board_size, win_condition, game_id):
 
     board = np.zeros((board_size, board_size), dtype=np.int32)
     steps = []
-    current_player = 1
+
+    # 随机开局 (与 play_one_game 一致)
+    opening_moves = worker1._random_opening()
+    start_step = 0
+    if opening_moves:
+        for i, (x, y) in enumerate(opening_moves):
+            player = 1 if i % 2 == 0 else 2
+            board[x, y] = player
+        start_step = len(opening_moves)
+
+    current_player = 2 if start_step % 2 == 1 else 1
     max_steps = board_size * board_size
     winner = 0
 
-    for step in range(max_steps):
+    for step in range(start_step, max_steps):
         state = worker1._build_state(board, current_player)
-        temperature = 1.0 if step < worker1.temp_threshold else 0.1
+        temperature = (1.0 if step < worker1.temp_threshold
+                       else worker1.temp_final)
 
         # 先手第一手完全均匀随机落子 (不固定天元); 第二手起走 MCTS
         if not board.any():

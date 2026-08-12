@@ -164,17 +164,33 @@ class ReplayBuffer:
         return self._size
 
     def save(self, filepath: str):
-        """保存 ReplayBuffer 到磁盘 (压缩 numpy 格式)"""
-        np.savez_compressed(
-            filepath,
-            states=self._states[:self._size],
-            policies=self._policies[:self._size],
-            values=self._values[:self._size],
-            head=self._head,
-            size=self._size,
-            capacity=self.capacity,
-            board_size=self.board_size
-        )
+        """
+        保存 ReplayBuffer 到磁盘 (压缩 numpy 格式).
+
+        先写临时文件再原子替换, 失败自动重试 2 次 —— 大文件写入可能被杀软/
+        索引/其他进程瞬间锁定 (OSError Errno 22), 避免因此丢数据。
+        注意: 临时文件后缀必须是 .npz, 部分环境的文件过滤会吞掉 .tmp/.saving
+        等非白名单后缀的 numpy 写入文件。
+        """
+        tmp_path = filepath + '.atomic.npz'
+        for attempt in range(3):
+            try:
+                np.savez_compressed(
+                    tmp_path,
+                    states=self._states[:self._size],
+                    policies=self._policies[:self._size],
+                    values=self._values[:self._size],
+                    head=self._head,
+                    size=self._size,
+                    capacity=self.capacity,
+                    board_size=self.board_size
+                )
+                os.replace(tmp_path, filepath)  # 原子替换, 不会留下半截文件
+                return
+            except OSError:
+                if attempt >= 2:
+                    raise
+                time.sleep(1.0)  # 等待瞬态锁释放后重试
 
     def load(self, filepath: str):
         """从磁盘加载 ReplayBuffer"""
@@ -998,7 +1014,30 @@ def train(args):
     resume_info = ""
     ckpt = None  # 在外层作用域保存，后续恢复优化器/scheduler 时复用
 
-    if os.path.exists(checkpoint_path):
+    if args.init_path:
+        # 从用户指定的任意权重文件加载 (纯权重或 checkpoint 均可, 学习率重置)
+        if not os.path.exists(args.init_path):
+            raise FileNotFoundError(f"--init_path 不存在: {args.init_path}")
+        state = torch.load(args.init_path, map_location=device, weights_only=False)
+        sd = state['model_state_dict'] if 'model_state_dict' in state else state
+        model.load_state_dict(sd)
+        print(f"  [恢复] 已从指定权重加载: {args.init_path} "
+              f"(学习率重置, 不恢复优化器/调度器)")
+    elif args.init_from == 'fresh':
+        print("--init_from fresh: 从零开始训练 (跳过 checkpoint / 蒸馏权重)")
+    elif args.init_from == 'distill':
+        # 强制从蒸馏权重开始 (跳过 checkpoint, 用于价值头坍缩后的恢复)
+        state_path = (distill_best_path if os.path.exists(distill_best_path)
+                      else distill_model_path)
+        if not os.path.exists(state_path):
+            raise FileNotFoundError(
+                f"--init_from distill 需要蒸馏权重: {distill_model_path}")
+        state = torch.load(state_path, map_location=device, weights_only=False)
+        model.load_state_dict(state['model_state_dict']
+                              if 'model_state_dict' in state else state)
+        print(f"  [恢复] 已从蒸馏权重重新开始: {state_path} "
+              f"(价值头健康, 学习率重置, 用于打破平局坍缩)")
+    elif os.path.exists(checkpoint_path):
         print(f"发现 checkpoint: {checkpoint_path}")
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
@@ -1108,7 +1147,7 @@ def train(args):
 
     # 对手池
     opponent_pool = OpponentPool(
-        max_size=20,
+        max_size=100,
         update_interval=500,
         selection_strategy='newer_biased'
     )
@@ -1131,7 +1170,14 @@ def train(args):
         mcts_batch_size=mcts_batch_size,
         cpu_workers=args.cpu_workers,
         fp16=args.fp16,
-        use_human_knowledge=args.mcts_human_knowledge
+        use_human_knowledge=args.mcts_human_knowledge,
+        c_puct=args.c_puct,
+        dirichlet_alpha=args.dirichlet_alpha,
+        dirichlet_epsilon=args.dirichlet_epsilon,
+        temp_threshold=args.temp_threshold,
+        temp_final=args.temp_final,
+        draw_reward=args.draw_reward,
+        random_open_moves=args.random_open_moves,
     )
     self_play_manager.model_class = model_tag  # 告知管理器模型类型 (用于序列化)
 
@@ -1295,6 +1341,7 @@ def train(args):
         num_samples_this_iter = len(game_data)
         raw_steps = num_samples_this_iter
         avg_game_len = raw_steps / max(1, num_games_this_iter)
+        sp_stats = self_play_manager.last_stats or {}   # 本轮对局胜负统计
 
         total_games += num_games_this_iter
         total_samples += num_samples_this_iter
@@ -1540,6 +1587,16 @@ def train(args):
                 writer.add_scalar('mcts/steps_per_sec', steps_per_sec, update_step)
                 writer.add_scalar('mcts/sims_per_sec', sims_per_sec, update_step)
                 writer.add_scalar('mcts/gpu_mem_mb', gpu_mem_used, update_step)
+                # 本轮自博弈/对手池对局的胜负分布 (价值坍缩监测: tie_rate 持续=1 即异常)
+                if sp_stats:
+                    writer.add_scalar('mcts/tie_rate',
+                                      sp_stats.get('tie_rate', 0.0), update_step)
+                    writer.add_scalar('mcts/selfplay_win_rate',
+                                      sp_stats.get('selfplay_win_rate', 0.0), update_step)
+                    writer.add_scalar('mcts/main_win_rate_first',
+                                      sp_stats.get('main_first_win_rate', 0.0), update_step)
+                    writer.add_scalar('mcts/main_win_rate_second',
+                                      sp_stats.get('main_second_win_rate', 0.0), update_step)
 
     # ============================================================
     # 清理
@@ -1644,6 +1701,35 @@ def main():
                         help='在 MCTS 搜索树中启用战术知识增强 '
                              '(连五/堵五 +10, 活四双四/化解对手活四点 +8), '
                              '默认关闭; 胜点检测已向量化+缓存, 开销远小于逐叶扫描')
+    parser.add_argument('--init_from', type=str, default='auto',
+                        choices=['auto', 'checkpoint', 'distill', 'fresh'],
+                        help='权重初始化来源: auto=自动 (checkpoint→蒸馏→随机); '
+                             'checkpoint=强制恢复 checkpoint; '
+                             'distill=强制从蒸馏权重开始 (价值头坍缩恢复用, '
+                             '跳过 checkpoint 且学习率重置); fresh=从零开始')
+    parser.add_argument('--init_path', type=str, default=None,
+                        help='从任意权重文件加载 (纯权重或含 model_state_dict 的 '
+                             'checkpoint 均可), 学习率重置; 优先级高于 --init_from')
+    parser.add_argument('--c_puct', type=float, default=1.5,
+                        help='PUCT 探索常数 (越大越探索, 默认 1.5)')
+    parser.add_argument('--dirichlet_alpha', type=float, default=0.3,
+                        help='根节点 Dirichlet 噪声 alpha (默认 0.3; '
+                             '越大噪声越均匀, 开局越多样, 建议 0.3~1.0)')
+    parser.add_argument('--dirichlet_epsilon', type=float, default=0.25,
+                        help='根节点 Dirichlet 噪声混合比例 (默认 0.25; '
+                             '越大越随机, 建议 0.25~0.5)')
+    parser.add_argument('--temp_threshold', type=int, default=30,
+                        help='温度退火阈值: 前 N 手用 τ=1.0 全随机采样 '
+                             '(默认 30, 加大可增加开局变化)')
+    parser.add_argument('--temp_final', type=float, default=0.1,
+                        help='阈值后的温度 τ (默认 0.1; 越大中后盘越随机, '
+                             '建议 0.1~0.4, 用于打破固定范式)')
+    parser.add_argument('--draw_reward', type=float, default=0.0,
+                        help='平局的价值目标 z (默认 0.0; 设为 -0.1~-0.3 让模型'
+                             '厌恶平局、主动求胜, 防止价值头坍缩到 0 导致全平局)')
+    parser.add_argument('--random_open_moves', type=int, default=0,
+                        help='每局随机开局 N 手 (默认 0; 建议 4~12, '
+                             '制造不平衡局面, 增加胜负样本与战法多样性)')
     parser.add_argument('--save_interval_hours', type=float, default=1.0,
                         help='自动保存间隔 (小时, 默认 1.0, 设为 0 禁用)')
     parser.add_argument('--log_dir', type=str, default='runs',
