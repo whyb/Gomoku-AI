@@ -258,6 +258,7 @@
     <div id="loading" class="fixed inset-0 bg-white/90 z-50 flex flex-col items-center justify-center">
         <div class="w-12 h-12 border-4 border-secondary border-t-transparent rounded-full animate-spin"></div>
         <p class="mt-4 text-sm font-bold tracking-widest text-primary/60">AI引擎加载中...</p>
+        <p id="loadingDetail" class="mt-2 text-[11px] font-mono text-gray-400"></p>
     </div>
 
     <script>
@@ -997,7 +998,120 @@
         ort.env.wasm.numThreads = 1;
         ort.env.logLevel = 'verbose';
 
-        // ========= 2. 重写 init 函数 =========
+        // ========= 3. 浏览器能力检测 + 自动选择推理后端 =========
+        // 按官方兼容性表检测：WebGPU(Chrome/Edge) > WebNN(仅Chromium+flag) > WebGL(全浏览器) > WASM(CPU保底)
+        function detectWebGPU() {
+            return typeof navigator !== 'undefined' && !!navigator.gpu;
+        }
+        function detectWebGL() {
+            try {
+                const c = document.createElement('canvas');
+                return !!(c.getContext('webgl2') || c.getContext('webgl'));
+            } catch (e) {
+                return false;
+            }
+        }
+        function detectWebNN() {
+            return typeof navigator !== 'undefined' && !!navigator.ml;
+        }
+
+        // 按浏览器支持程度从快到慢排序；wasm(CPU) 永远保底
+        function getPreferredEPs() {
+            const eps = [];
+            if (detectWebGPU()) eps.push('webgpu');  // Chrome/Edge: Windows/Android/macOS (iOS 无)
+            if (detectWebNN())  eps.push('webnn');   // 仅 Chromium Windows + --enable-features 标志
+            if (detectWebGL())  eps.push('webgl');   // 所有浏览器可用（维护模式）
+            eps.push('wasm');                         // CPU 推理保底，全平台可用
+            return eps;
+        }
+
+        // 单个后端最多重试 3 次，每次带 30s 超时
+        async function createSessionWithRetry(modelPath, ep, attempts = 3) {
+            let lastErr = null;
+            for (let i = 1; i <= attempts; i++) {
+                const detail = document.getElementById('loadingDetail');
+                if (detail) detail.textContent = `尝试后端 ${ep} (${i}/${attempts})...`;
+                console.log(`[onnx] 第 ${i}/${attempts} 次尝试后端: ${ep}`);
+                const loadPromise = ort.InferenceSession.create(modelPath, { executionProviders: [ep] });
+                const timeoutPromise = new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('加载超时(30s)，请检查网络或刷新重试')), 30000)
+                );
+                try {
+                    return await Promise.race([loadPromise, timeoutPromise]);
+                } catch (err) {
+                    lastErr = err;
+                    console.warn(`[onnx] 后端 ${ep} 第 ${i}/${attempts} 次失败:`, err.message || err);
+                }
+            }
+            throw lastErr;
+        }
+
+        // ========= 4. 桌面浏览器 file:// 双击打开提示（Chromium / Firefox 区分） =========
+        // 用户双击 index.html 时浏览器禁止本地 fetch 模型，按浏览器区分给出解决方案
+        function detectBrowser() {
+            const ua = navigator.userAgent;
+            if (/Edg\//i.test(ua)) return 'edge';
+            if (/OPR\//i.test(ua) || /Opera/i.test(ua)) return 'opera';
+            if (/Firefox\//i.test(ua)) return 'firefox';
+            if (/Chrome\//i.test(ua)) return 'chrome';
+            return null;
+        }
+        function isMobileUA() {
+            return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+        }
+        function isMacPlatform() {
+            return /Macintosh|Mac OS X|MacIntel/i.test(navigator.platform || navigator.userAgent);
+        }
+        function chromiumLaunchHint() {
+            if (isMobileUA()) return '';          // 移动端无法用命令行参数，跳过
+            const browser = detectBrowser();
+            if (!browser) return '';              // 非 Chromium 内核不提示
+            const names = { chrome: 'Chrome', edge: 'Edge', opera: 'Opera' };
+            const name = names[browser];
+            let cmd;
+            if (browser === 'edge') {
+                cmd = isMacPlatform()
+                    ? `open -a "Microsoft Edge" --args --allow-file-access-from-files`
+                    : `msedge.exe --allow-file-access-from-files`;
+            } else if (browser === 'opera') {
+                cmd = isMacPlatform()
+                    ? `open -a "Opera" --args --allow-file-access-from-files`
+                    : `opera.exe --allow-file-access-from-files`;
+            } else {
+                cmd = isMacPlatform()
+                    ? `open -a "Google Chrome" --args --allow-file-access-from-files`
+                    : `chrome.exe --allow-file-access-from-files`;
+            }
+            return `
+                <hr class="my-3 border-gray-200"/>
+                <p class="font-bold text-gray-700">如果你是通过双击 index.html 直接打开的：</p>
+                <p class="text-gray-600">浏览器会禁止本地文件读取 AI 模型，请<b>完全退出 ${name}</b> 后，在终端/命令行运行以下命令启动：</p>
+                <code class="block bg-gray-800 text-white p-2 rounded mt-1 break-all">${cmd}</code>
+                <p class="text-gray-500 mt-2">或者使用 VS Code <b>Live Server</b> 插件，或执行 <code class="text-gray-700">python -m http.server</code> 启动本地服务器后访问。</p>`;
+        }
+        function firefoxLaunchHint() {
+            return `
+                <hr class="my-3 border-gray-200"/>
+                <p class="font-bold text-gray-700">如果你是通过双击 index.html 直接打开的：</p>
+                <p class="text-gray-600">Firefox 有一个隐藏的 <b>about:config</b> 配置项，专门用来解除 file:// 协议下的跨域限制，<b>这是 Firefox 比 Edge/Chrome 更友好的地方</b>：</p>
+                <ol class="list-decimal ml-4 mt-1 space-y-1 text-gray-600">
+                    <li>在 Firefox 地址栏输入 <code class="bg-gray-100 px-1 rounded">about:config</code> 并回车</li>
+                    <li>点击 <b>“接受风险并继续”</b>（如果出现警告页面）</li>
+                    <li>在搜索框输入 <code class="bg-gray-100 px-1 rounded">privacy.file_unique_origin</code></li>
+                    <li>你会看到该值为 <b>true</b>（默认），<b>双击它，将其切换为 false</b></li>
+                    <li>关闭该标签页，<b>重启 Firefox</b></li>
+                    <li>再次双击你的 index.html，此时 fetch 本地 model_bs15_win5.onnx 将<b>不再报 CORS 错误</b>，模型可以正常加载</li>
+                </ol>
+                <p class="text-amber-700 mt-2">⚠️ <b>注意</b>：此设置会让本地 file:// 页面可以互相访问文件，有一定安全隐患（恶意本地 HTML 文件可读取你的本地文件）。建议调试完成后，<b>记得把该值改回 true</b>。</p>`;
+        }
+        function desktopLaunchHint() {
+            if (isMobileUA()) return '';          // 移动端无法用命令行参数 / about:config，跳过
+            const browser = detectBrowser();
+            if (browser === 'firefox') return firefoxLaunchHint();
+            return chromiumLaunchHint();          // chrome / edge / opera 及非 Firefox 一律走 Chromium 提示
+        }
+
+        // ========= 2. 重写 init 函数（自动选后端 + 重试 + CPU 保底） =========
         async function init() {
             drawGrid();
             initInteractions();
@@ -1009,12 +1123,33 @@
             loading.classList.remove('hidden');
 
             try {
-                const loadPromise = ort.InferenceSession.create('model_bs15_win5.onnx');
-                const timeoutPromise = new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('加载超时(30s)，请检查网络或刷新重试')), 30000)
-                );
+                const eps = getPreferredEPs();
+                console.log('[onnx] 候选后端顺序:', eps.join(' -> '));
 
-                gameState.model = await Promise.race([loadPromise, timeoutPromise]);
+                let model = null;
+                let usedEP = null;
+                let lastErr = null;
+
+                for (const ep of eps) {
+                    try {
+                        model = await createSessionWithRetry('model_bs15_win5.onnx', ep, 3);
+                        usedEP = ep;
+                        break;
+                    } catch (err) {
+                        lastErr = err;
+                        console.warn(`[onnx] 后端 ${ep} 三次尝试均失败，切换到下一后端`);
+                    }
+                }
+
+                if (!model) {
+                    throw new Error(`所有推理后端均加载失败。最后错误: ${lastErr && lastErr.message}`);
+                }
+
+                gameState.model = model;
+                console.log(`[onnx] 推理后端已确定: ${usedEP}`);
+
+                const detail = document.getElementById('loadingDetail');
+                if (detail) detail.textContent = '';
 
                 loading.classList.add('hidden');
                 reset();
@@ -1029,14 +1164,17 @@
                 const icon = document.getElementById('resultIcon');
                 const btn = document.getElementById('btnPlayAgain');
 
-                icon.innerText = "📱";
-                title.innerText = "手机端加载失败";
+                const mobile = isMobileUA();
+                icon.innerText = mobile ? "📱" : "🛠️";
+                title.innerText = mobile ? "手机端加载失败" : "引擎加载失败";
 
                 let errorDetail = e.message || String(e);
                 let suggestion = '';
 
                 // 根据真实错误给出具体建议
-                if (errorDetail.includes('Out of Memory') || errorDetail.includes('memory')) {
+                if (errorDetail.includes('所有推理后端')) {
+                    suggestion = '所有推理后端均不可用，请使用最新版 Chrome/Safari，并确认页面通过 http(s) 服务器访问（勿直接用 file:// 打开）。';
+                } else if (errorDetail.includes('Out of Memory') || errorDetail.includes('memory')) {
                     suggestion = '当前手机内存不足，或因浏览器限制，请尝试关闭后台应用后刷新或更换浏览器。';
                 } else if (errorDetail.includes('超时') || errorDetail.includes('fetch')) {
                     suggestion = '下载模型超时，请切换VPN重试。';
@@ -1046,6 +1184,8 @@
                     suggestion = '请复制下方错误信息反馈给开发者：';
                 }
 
+                const launchHint = desktopLaunchHint();
+
                 msg.innerHTML = `
                     <div class="text-left text-xs space-y-2 mt-2">
                         <p class="text-red-500 font-bold">❌ ${errorDetail}</p>
@@ -1053,7 +1193,8 @@
                         <div class="bg-gray-100 p-2 rounded break-all text-[10px] text-gray-500">
                             ${e.stack || '无堆栈信息'}
                         </div>
-                        <p class="text-gray-400 mt-2">✅ 建议使用 Android Chrome 或 iOS Safari 最新版</p>
+                        ${mobile ? '<p class="text-gray-400 mt-2">✅ 建议使用 Android Chrome 或 iOS Safari 最新版</p>' : ''}
+                        ${launchHint}
                     </div>
                 `;
 
