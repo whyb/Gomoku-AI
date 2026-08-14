@@ -6,7 +6,7 @@
     <title>五子棋AI</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdn.jsdelivr.net/npm/font-awesome@4.7.0/css/font-awesome.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.23.2/dist/ort.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/ort.min.js"></script>
     
     <script>
         tailwind.config = {
@@ -990,80 +990,78 @@
             return false;
         }
 
-        // 浏览器环境诊断及教程提示功能
-        function showFixTutorial(error) {
-            const ua = navigator.userAgent;
-            const isMac = /Macintosh|Mac OS X/i.test(ua);
-            let browser = "Chrome";
-            if (ua.indexOf("Firefox") > -1) browser = "Firefox";
-            else if (ua.indexOf("Edg") > -1) browser = "Edge";
-            else if (ua.indexOf("OPR") > -1 || ua.indexOf("Opera") > -1) browser = "Opera";
-            else if (ua.indexOf("Safari") > -1 && ua.indexOf("Chrome") === -1) browser = "Safari";
-
-            const modal = document.getElementById('resultModal');
-            const title = document.getElementById('resultTitle');
-            const msg = document.getElementById('resultMsg');
-            const icon = document.getElementById('resultIcon');
-
-            icon.innerText = "🛠️";
-            title.innerText = "环境配置异常";
-            
-            let tutorial = `<div class="text-left text-xs space-y-2 mt-4 overflow-y-auto max-h-60">
-                <p class="font-bold text-red-500">检测到跨域错误 (CORS)：浏览器禁止直接从本地文件加载 AI 模型。</p>
-                <hr/>`;
-
-            if (browser === "Firefox") {
-                tutorial += `
-                    <p><b>Firefox 修复方案：</b></p>
-                    <ol class="list-decimal ml-4">
-                        <li>地址栏输入 <b>about:config</b> 并回车</li>
-                        <li>搜索 <b>privacy.file_unique_origin</b></li>
-                        <li>双击切换为 <b class="text-secondary">false</b></li>
-                        <li>重启浏览器并重新打开此 HTML</li>
-                    </ol>`;
-            } else if (browser === "Safari") {
-                tutorial += `
-                    <p><b>Safari 修复方案：</b></p>
-                    <ol class="list-decimal ml-4">
-                        <li>菜单栏选择“设置” -> “高级”</li>
-                        <li>勾选“在菜单栏中显示‘开发’菜单”</li>
-                        <li>点击上方菜单栏“开发” -> <b class="text-secondary">停用本地文件限制</b></li>
-                    </ol>`;
-            } else {
-                // Chrome, Edge, Opera 核心逻辑相似
-                const cmd = isMac 
-                    ? `open -a "Google Chrome" --args --allow-file-access-from-files` 
-                    : `chrome.exe --allow-file-access-from-files`;
-                tutorial += `
-                    <p><b>${browser} (Chromium) 修复方案：</b></p>
-                    <p>1. <b>推荐方案：</b> 使用 VS Code 的 <b>Live Server</b> 插件或执行 <code>python -m http.server</code> 启动本地服务器。</p>
-                    <p>2. <b>临时方案：</b> 完全退出浏览器，在终端/命令行运行：</p>
-                    <code class="block bg-gray-800 text-white p-2 rounded mt-1 break-all">${cmd}</code>`;
-            }
-
-            tutorial += `</div>`;
-            msg.innerHTML = tutorial;
-            
-            document.getElementById('btnPlayAgain').innerText = "查看在线文档";
-            document.getElementById('btnPlayAgain').onclick = () => window.open('https://github.com/whyb/Gomoku-AI/');
-            modal.classList.remove('hidden');
-            document.getElementById('loading').classList.add('hidden');
-        }
-
+        // ========= 1. 强制手机端最优配置（放在 init 函数之前） =========
+        // 开启 SIMD 加速（现在 iPhone 12 及以上、所有 Android 新机均支持，能减少内存开销）
+        ort.env.wasm.simd = true;
+        // 强制使用单线程（避免 SharedArrayBuffer 跨域隔离要求）
         ort.env.wasm.numThreads = 1;
-        ort.env.wasm.simd = false;
+        ort.env.logLevel = 'verbose';
+
+        // ========= 2. 重写 init 函数 =========
         async function init() {
             drawGrid();
             initInteractions();
             drawCoordinates();
             refreshMoveNumbers();
+
+            // 显示加载状态（但不再永久卡死）
+            const loading = document.getElementById('loading');
+            loading.classList.remove('hidden');
+
             try {
-                gameState.model = await ort.InferenceSession.create('model_bs15_win5.onnx');
-                document.getElementById('loading').classList.add('hidden');
+                const loadPromise = ort.InferenceSession.create('model_bs15_win5.onnx');
+                const timeoutPromise = new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error('加载超时(30s)，请检查网络或刷新重试')), 30000)
+                );
+
+                gameState.model = await Promise.race([loadPromise, timeoutPromise]);
+
+                loading.classList.add('hidden');
                 reset();
+
             } catch (e) {
-                console.error(e);
-                showFixTutorial(e);
+                loading.classList.add('hidden');
+                console.error('真实错误原因:', e); // 真实现场打印
+
+                const modal = document.getElementById('resultModal');
+                const title = document.getElementById('resultTitle');
+                const msg = document.getElementById('resultMsg');
+                const icon = document.getElementById('resultIcon');
+                const btn = document.getElementById('btnPlayAgain');
+
+                icon.innerText = "📱";
+                title.innerText = "手机端加载失败";
+
+                let errorDetail = e.message || String(e);
+                let suggestion = '';
+
+                // 根据真实错误给出具体建议
+                if (errorDetail.includes('Out of Memory') || errorDetail.includes('memory')) {
+                    suggestion = '当前手机内存不足，或因浏览器限制，请尝试关闭后台应用后刷新或更换浏览器。';
+                } else if (errorDetail.includes('超时') || errorDetail.includes('fetch')) {
+                    suggestion = '下载模型超时，请切换VPN重试。';
+                } else if (errorDetail.includes('WebAssembly') || errorDetail.includes('Compile')) {
+                    suggestion = '浏览器版本过低，请使用最新版 Chrome 或 Firefox 打开。';
+                } else {
+                    suggestion = '请复制下方错误信息反馈给开发者：';
+                }
+
+                msg.innerHTML = `
+                    <div class="text-left text-xs space-y-2 mt-2">
+                        <p class="text-red-500 font-bold">❌ ${errorDetail}</p>
+                        <p class="text-gray-600">💡 ${suggestion}</p>
+                        <div class="bg-gray-100 p-2 rounded break-all text-[10px] text-gray-500">
+                            ${e.stack || '无堆栈信息'}
+                        </div>
+                        <p class="text-gray-400 mt-2">✅ 建议使用 Android Chrome 或 iOS Safari 最新版</p>
+                    </div>
+                `;
+
+                btn.innerText = "🔄 重新加载";
+                btn.onclick = () => window.location.reload();
+
+                modal.classList.remove('hidden');
+                document.getElementById('status').innerText = '引擎加载失败';
             }
         }
 
