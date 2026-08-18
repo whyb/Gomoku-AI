@@ -139,6 +139,11 @@
                 text-shadow: 0 0 3px rgba(255, 244, 224, 0.55);
             }
 
+            /* 对局计时: 当前行棋方高亮, 另一方淡显 */
+            .clock-chip { @apply transition-colors duration-200; }
+            .clock-chip.clock-active { @apply text-secondary; }
+            .clock-chip.clock-idle { @apply opacity-40; }
+
             /* 移动端交互优化: 消除点击高亮闪烁与 300ms 双击缩放延迟 */
             button, select, input[type="checkbox"], label, .intersect-point {
                 touch-action: manipulation;
@@ -214,6 +219,10 @@
                     <input type="checkbox" id="moveOrder" class="w-5 h-5 sm:w-4 sm:h-4 rounded border-gray-300 text-secondary focus:ring-secondary" checked>
                     <span class="text-xs sm:text-[11px] font-medium">落子顺序</span>
                 </label>
+                <label class="flex items-center cursor-pointer gap-2" title="开启后 AI 每步使用 400 次蒙特卡洛树搜索（MCTS），棋力更强但思考更久">
+                    <input type="checkbox" id="mctsEnabled" class="w-5 h-5 sm:w-4 sm:h-4 rounded border-gray-300 text-secondary focus:ring-secondary">
+                    <span class="text-xs sm:text-[11px] font-medium">MCTS 思考</span>
+                </label>
                 <div class="h-4 w-px bg-gray-300 mx-1 hidden sm:block"></div>
                 <button id="undo" class="bg-amber-100 text-amber-800 border border-amber-500 text-xs sm:text-[11px] px-3.5 py-2 sm:px-3 sm:py-1.5 rounded-lg hover:bg-amber-500 hover:text-white transition-colors shadow-sm whitespace-nowrap">
                     悔棋
@@ -226,6 +235,11 @@
         
         <div id="status" class="text-center text-xs font-bold tracking-widest text-secondary uppercase animate-pulse">
             正在初始化引擎...
+        </div>
+        <div class="mt-1.5 flex items-center justify-center gap-3 text-xs font-mono font-bold tracking-widest text-primary/60 select-none">
+            <span id="clockAi" class="clock-chip clock-idle">AI 00:00</span>
+            <span class="opacity-30">·</span>
+            <span id="clockHuman" class="clock-chip clock-idle">玩家 00:00</span>
         </div>
     </div>
 
@@ -277,6 +291,53 @@
             humanPlayer: 1,    // 默认人类执黑(先手), AI执白(后手)
             aiPlayer: 2
         };
+
+        // ---------- 对局计时 (AI 思考 / 玩家思考, 只显示 分:秒) ----------
+        let clockInterval = null;
+        const clockState = { aiMs: 0, humanMs: 0, active: null };
+        const CLOCK_TICK_MS = 250;
+
+        function formatClock(ms) {
+            const totalSec = Math.floor(ms / 1000);
+            const mm = String(Math.floor(totalSec / 60)).padStart(2, '0');
+            const ss = String(totalSec % 60).padStart(2, '0');
+            return `${mm}:${ss}`;
+        }
+
+        function renderClock() {
+            const aiEl = document.getElementById('clockAi');
+            const huEl = document.getElementById('clockHuman');
+            if (!aiEl || !huEl) return;
+            aiEl.textContent = `AI ${formatClock(clockState.aiMs)}`;
+            huEl.textContent = `玩家 ${formatClock(clockState.humanMs)}`;
+            aiEl.classList.toggle('clock-active', clockState.active === 'ai');
+            aiEl.classList.toggle('clock-idle', clockState.active !== 'ai');
+            huEl.classList.toggle('clock-active', clockState.active === 'human');
+            huEl.classList.toggle('clock-idle', clockState.active !== 'human');
+        }
+
+        function stopClock() {
+            if (clockInterval) { clearInterval(clockInterval); clockInterval = null; }
+            clockState.active = null;
+        }
+
+        function startClock(side) {
+            stopClock();
+            clockState.active = side;
+            renderClock();
+            clockInterval = setInterval(() => {
+                if (clockState.active === 'ai') clockState.aiMs += CLOCK_TICK_MS;
+                else if (clockState.active === 'human') clockState.humanMs += CLOCK_TICK_MS;
+                renderClock();
+            }, CLOCK_TICK_MS);
+        }
+
+        function resetClocks() {
+            stopClock();
+            clockState.aiMs = 0;
+            clockState.humanMs = 0;
+            renderClock();
+        }
 
         function drawGrid() {
             const gridContainer = document.getElementById('grid-bg');
@@ -481,6 +542,7 @@
 
             gameState.isAIMoving = true;
             document.getElementById('status').innerText = 'AI 正在思考...';
+            startClock('ai');
             aiTimer = setTimeout(aiLogic, 1);
         }
 
@@ -824,64 +886,293 @@
             return null;
         }
 
+        // ---------- MCTS 搜索 (与 mcts.py 的 MCTS 类对齐) ----------
+        const MCTS_SIMULATIONS = 400;           // 勾选 MCTS 思考后每步模拟次数
+        const MCTS_SKIP_MOVES = 2;              // 前 N 手不走 MCTS (第 1 手天元 + 前几手快速开局)
+        const MCTS_C_PUCT = 1.5;                // PUCT 探索常数 (与训练一致)
+        const MCTS_CANDIDATE_RADIUS = 2;        // 只搜已有棋子周围 2 格内的候选点
+        const MCTS_EARLY_STOP_THRESHOLD = 0.95; // 某手访问占比超过阈值时提前终止
+        const MCTS_EARLY_STOP_MIN_SIMS = 50;
+
+        class MctsNode {
+            constructor(prior, parent = null, action = -1) {
+                this.parent = parent;
+                this.action = action;      // 到达此节点的动作
+                this.children = new Map(); // action -> MctsNode
+                this.N = 0;                // 访问次数
+                this.W = 0;                // 累计价值
+                this.Q = 0;                // 平均价值 = W / N
+                this.P = prior;            // 先验概率 (来自策略网络)
+                this.isExpanded = false;
+                this.currentPlayer = 1;    // 此节点的当前玩家
+            }
+
+            // PUCT 选择: 选 UCB 最高的子节点 (Q 取反, 因子节点是对手走的)
+            selectChildPuct(cPuct) {
+                let bestChild = null;
+                let bestScore = -Infinity;
+                const sqrtParentN = Math.sqrt(this.N + 1);
+                for (const child of this.children.values()) {
+                    const qValue = -child.Q;
+                    const uValue = cPuct * child.P * sqrtParentN / (1 + child.N);
+                    const score = qValue + uValue;
+                    if (score > bestScore) { bestScore = score; bestChild = child; }
+                }
+                return bestChild;
+            }
+
+            // 扩展节点: 对合法动作的 logits 做 softmax 生成子节点先验
+            expand(policyLogits, validActions, currentPlayer) {
+                this.currentPlayer = currentPlayer;
+                this.isExpanded = true;
+                let maxLogit = -Infinity;
+                for (const a of validActions) {
+                    if (policyLogits[a] > maxLogit) maxLogit = policyLogits[a];
+                }
+                const exps = [];
+                let sum = 0;
+                for (const a of validActions) {
+                    const e = Math.exp(policyLogits[a] - maxLogit);
+                    exps.push(e);
+                    sum += e;
+                }
+                for (let i = 0; i < validActions.length; i++) {
+                    const a = validActions[i];
+                    this.children.set(a, new MctsNode(exps[i] / sum, this, a));
+                }
+            }
+
+            // 价值回传: 每层交替视角 (当前玩家价值对父节点为对手价值)
+            backup(value) {
+                let node = this;
+                while (node) {
+                    node.N += 1;
+                    node.W += value;
+                    node.Q = node.W / node.N;
+                    value = -value;
+                    node = node.parent;
+                }
+            }
+        }
+
+        // 合法动作: 已有棋子周围 radius 格内空点 + 双方一步连五点 (对应 get_candidate_mask)
+        function mctsValidActions(b) {
+            const set = new Set(boardNearCells(b, MCTS_CANDIDATE_RADIUS));
+            const empties = [];
+            for (let i = 0; i < boardSquare; i++) if (b[i] === 0) empties.push(i);
+            for (const p of [1, 2]) {
+                for (const w of winPoints(b, p, empties)) set.add(w);
+            }
+            return [...set].filter(i => b[i] === 0);
+        }
+
+        // 单次 NN 前向: 当前玩家视角 (2,H,W), 返回 {logits, value}
+        async function evaluateBoard(b, currentPlayer) {
+            const input = new Float32Array(boardSquare * 2).fill(0);
+            for (let i = 0; i < boardSquare; i++) {
+                if (b[i] === currentPlayer) input[i] = 1;
+                else if (b[i] !== 0) input[i + boardSquare] = 1;
+            }
+            const tensor = new ort.Tensor('float32', input, [1, 2, boardSize, boardSize]);
+            const output = await gameState.model.run({ input: tensor });
+            return {
+                logits: output.policy_logits.data,
+                value: output.value ? output.value.data[0] : 0
+            };
+        }
+
+        // 软战术先验叠加: logits[a] = max(logits[a], max_logit + level)
+        // (对应 mcts.py 的 _apply_tactical_prior, 与快速路径行为一致)
+        function applyTacticalPriorToLogits(logits, prior) {
+            if (!prior || Object.keys(prior).length === 0) return;
+            let maxLogit = -Infinity;
+            for (let i = 0; i < boardSquare; i++) {
+                if (logits[i] > maxLogit) maxLogit = logits[i];
+            }
+            if (maxLogit === -Infinity) return;
+            for (const key of Object.keys(prior)) {
+                const a = Number(key);
+                const v = maxLogit + prior[key];
+                if (logits[a] < v) logits[a] = v;
+            }
+        }
+
+        // AlphaZero 风格 MCTS 搜索 (对应 mcts.py MCTS.search, 推理期无噪声)
+        // 返回最佳动作索引, 被悔棋/重置中断时返回 -1
+        async function mctsSearch(ai, myEpoch) {
+            const b = gameState.board;
+            const validActions = mctsValidActions(b);
+            if (validActions.length <= 1) {
+                return validActions.length === 1 ? validActions[0] : -1;
+            }
+            // 从棋子数推导当前玩家 (与 mcts.py 一致): 黑棋先手, 子数相等→P1
+            const currentPlayer = countStones(b, 1) === countStones(b, 2) ? 1 : 2;
+
+            const root = new MctsNode(0);
+            const rootEval = await evaluateBoard(b, currentPlayer);
+            // 根节点叠加软战术先验 (与 --mcts_human_knowledge 一致)
+            applyTacticalPriorToLogits(rootEval.logits, tacticalPrior(b, currentPlayer));
+            root.expand(rootEval.logits, validActions, currentPlayer);
+
+            const validCache = new Map();    // 棋盘串 → 合法动作列表
+            const tacticsCache = new Map();  // 棋盘串 → 战术先验
+            for (let sim = 0; sim < MCTS_SIMULATIONS; sim++) {
+                if (myEpoch !== aiEpoch || gameState.gameOver) return -1;  // 悔棋/重置中断
+
+                // 1. SELECT: 沿 PUCT 选择到叶节点
+                let node = root;
+                const simBoard = b.slice();
+                const path = [node];
+                while (node.isExpanded && node.children.size > 0) {
+                    const child = node.selectChildPuct(MCTS_C_PUCT);
+                    simBoard[child.action] = node.currentPlayer;
+                    path.push(child);
+                    node = child;
+                }
+                const parent = path.length >= 2 ? path[path.length - 2] : root;
+                const lastAction = node.action;
+
+                // 2. 终局判断: 落子方连五 / 棋盘下满
+                let terminal = false;
+                let terminalValue = 0;
+                if (lastAction >= 0) {
+                    if (makesFiveAt(simBoard, lastAction, simBoard[lastAction])) {
+                        terminal = true;
+                        terminalValue = 1;
+                    } else if (simBoard.every(v => v !== 0)) {
+                        terminal = true;
+                        terminalValue = 0;
+                    }
+                }
+
+                let backupValue;
+                if (terminal) {
+                    // 落子方视角的价值, 回传时取反 (与 mcts.py 一致)
+                    backupValue = -terminalValue;
+                } else {
+                    // 3. EXPAND & EVALUATE: NN 推理 + 扩展叶节点
+                    const leafPlayer = 3 - parent.currentPlayer;
+                    const leafEval = await evaluateBoard(simBoard, leafPlayer);
+                    const boardKey = simBoard.join('');
+                    let prior = tacticsCache.get(boardKey);
+                    if (prior === undefined) {
+                        prior = tacticalPrior(simBoard, leafPlayer);
+                        tacticsCache.set(boardKey, prior);
+                    }
+                    applyTacticalPriorToLogits(leafEval.logits, prior);
+                    let leafValid = validCache.get(boardKey);
+                    if (leafValid === undefined) {
+                        leafValid = mctsValidActions(simBoard);
+                        validCache.set(boardKey, leafValid);
+                    }
+                    if (leafValid.length > 0) node.expand(leafEval.logits, leafValid, leafPlayer);
+                    backupValue = leafEval.value;
+                }
+
+                // 4. BACKUP: 价值回传
+                node.backup(backupValue);
+
+                // 5. 提前终止: 某动作访问占比 ≥95% 且已模拟够
+                if (sim >= MCTS_EARLY_STOP_MIN_SIMS && sim % 20 === 0) {
+                    let totalN = 0, bestN = 0;
+                    for (const child of root.children.values()) {
+                        totalN += child.N;
+                        if (child.N > bestN) bestN = child.N;
+                    }
+                    if (totalN > 0 && bestN / totalN >= MCTS_EARLY_STOP_THRESHOLD) break;
+                }
+                // 每 10 次模拟让出主线程, 保证计时器/UI 流畅
+                if (sim % 10 === 9) await new Promise(r => setTimeout(r, 0));
+            }
+
+            // 推理期低温: 直接用根节点访问次数最多的动作 (近似贪心)
+            let bestAction = -1, bestN = -1;
+            for (const [a, child] of root.children) {
+                if (child.N > bestN) { bestN = child.N; bestAction = a; }
+            }
+            return bestAction;
+        }
+
+        // 快速路径: 单次 NN 前向 + 软战术先验 + argmax (原默认推理, 也作为 MCTS 兜底)
+        async function fastMove(ai) {
+            const input = new Float32Array(boardSquare * 2).fill(0);
+            // 模型输入为当前玩家视角: channel0=当前玩家(AI)棋子, channel1=对手(人类)棋子
+            gameState.board.forEach((val, i) => {
+                if (val === ai) input[i] = 1;
+                if (val === gameState.humanPlayer) input[i + boardSquare] = 1;
+            });
+            const tensor = new ort.Tensor('float32', input, [1, 2, boardSize, boardSize]);
+            const output = await gameState.model.run({ input: tensor });
+            const logits = output.policy_logits.data;
+            // 软战术先验: 无强制走法时也对 NN logits 叠加 +10/+8
+            // (与 Python --mcts_human_knowledge 的 _apply_tactical_prior 一致)
+            const prior = tacticalPrior(gameState.board, ai);
+            let maxLogit = -Infinity;
+            for (let i = 0; i < boardSquare; i++) {
+                if (gameState.board[i] === 0 && logits[i] > maxLogit) {
+                    maxLogit = logits[i];
+                }
+            }
+            if (maxLogit !== -Infinity) {
+                for (const key of Object.keys(prior)) {
+                    const a = Number(key);
+                    const v = maxLogit + prior[key];
+                    if (logits[a] < v) logits[a] = v;
+                }
+            }
+            let bestMove = -1, maxVal = -Infinity;
+            for (let i = 0; i < boardSquare; i++) {
+                if (gameState.board[i] === 0 && logits[i] > maxVal) {
+                    maxVal = logits[i];
+                    bestMove = i;
+                }
+            }
+            return bestMove;
+        }
+
         async function aiLogic() {
             try {
                 const myEpoch = aiEpoch;
                 let bestMove = -1;
+                const stonesOnBoard = gameState.board.filter(x => x !== 0).length;
                 // AI 先手(执黑)时：棋盘为空，第一步必须落子天元(正中心)
-                if (gameState.board.filter(x => x!==0).length === 0) {
+                if (stonesOnBoard === 0) {
                     const center = Math.floor(boardSize / 2);
                     bestMove = center * boardSize + center;
                 } else {
-                    // 战术层: 强制走法 (连五/堵五/活四双四/活三防守)
+                    // 1. 强制走法 (连五/堵五/活四双四/活三防守), 优先级最高
                     const tactical = bestTacticalMove(gameState.board, gameState.aiPlayer);
                     if (tactical) {
                         bestMove = tactical.action;
                         console.log('[战术]', tactical.reason, '→', bestMove);
                     } else {
-                        const input = new Float32Array(boardSquare * 2).fill(0);
-                        // 模型输入为当前玩家视角: channel0=当前玩家(AI)棋子, channel1=对手(人类)棋子
-                        gameState.board.forEach((val, i) => {
-                            if (val === gameState.aiPlayer) input[i] = 1;
-                            if (val === gameState.humanPlayer) input[i + boardSquare] = 1;
-                        });
-                        const tensor = new ort.Tensor('float32', input, [1, 2, boardSize, boardSize]);
-                        const output = await gameState.model.run({ input: tensor });
-                        if (myEpoch !== aiEpoch || gameState.gameOver) return;  // 已被悔棋/重置
-                        const logits = output.policy_logits.data;
-                        // 软战术先验: 无强制走法时也对 NN logits 叠加 +10/+8
-                        // (与 Python --mcts_human_knowledge 的 _apply_tactical_prior 一致)
-                        const prior = tacticalPrior(gameState.board, gameState.aiPlayer);
-                        let maxLogit = -Infinity;
-                        for (let i = 0; i < boardSquare; i++) {
-                            if (gameState.board[i] === 0 && logits[i] > maxLogit) {
-                                maxLogit = logits[i];
-                            }
-                        }
-                        if (maxLogit !== -Infinity) {
-                            for (const key of Object.keys(prior)) {
-                                const a = Number(key);
-                                const v = maxLogit + prior[key];
-                                if (logits[a] < v) logits[a] = v;
-                            }
-                        }
-                        let maxVal = -Infinity;
-                        for (let i = 0; i < boardSquare; i++) {
-                            if (gameState.board[i] === 0 && logits[i] > maxVal) {
-                                maxVal = logits[i];
-                                bestMove = i;
-                            }
+                        // 2. MCTS 搜索 (勾选且已过开局快速期)
+                        const useMcts = document.getElementById('mctsEnabled').checked &&
+                                        stonesOnBoard >= MCTS_SKIP_MOVES;
+                        if (useMcts) {
+                            document.getElementById('status').innerText = 'AI MCTS 思考中...';
+                            console.log(`[mcts] 开始搜索 (${MCTS_SIMULATIONS} sims)...`);
+                            bestMove = await mctsSearch(gameState.aiPlayer, myEpoch);
+                            if (myEpoch !== aiEpoch || gameState.gameOver) return;  // 已被悔棋/重置
+                            console.log('[mcts] 完成 →', bestMove);
+                            if (bestMove < 0) bestMove = await fastMove(gameState.aiPlayer);
+                        } else {
+                            // 3. 快速路径: 单次 NN 前向 + 软战术先验
+                            bestMove = await fastMove(gameState.aiPlayer);
                         }
                     }
                 }
+                if (myEpoch !== aiEpoch || gameState.gameOver || bestMove < 0) return;
                 placePiece(bestMove, gameState.aiPlayer);
                 if (!checkGameOver(gameState.aiPlayer)) {
                     document.getElementById('status').innerText = '请落子...';
                     gameState.isAIMoving = false;
+                    startClock('human');
                     computeHints();
                 }
             } catch (e) {
                 console.error(e);
+                stopClock();
                 document.getElementById('status').innerText = 'AI 引擎异常';
             }
         }
@@ -919,14 +1210,17 @@
 
             // 悔棋到空棋盘 = 回到初始状态
             if (gameState.board.every(x => x === 0)) {
+                resetClocks();
                 if (gameState.aiPlayer === 1) {
                     // AI 先手: 重新触发 AI 开局落天元
                     gameState.isAIMoving = true;
                     document.getElementById('status').innerText = 'AI 思考开局...';
+                    startClock('ai');
                     aiTimer = setTimeout(aiLogic, 1);
                 } else {
                     gameState.isAIMoving = false;
                     document.getElementById('status').innerText = '执黑先行';
+                    startClock('human');
                     computeHints();
                 }
                 return;
@@ -936,6 +1230,7 @@
             gameState.isAIMoving = false;
             document.getElementById('status').innerText =
                 gameState.humanPlayer === 1 ? '执黑先行' : '请落子...';
+            startClock('human');
             computeHints();
         }
 
@@ -946,6 +1241,7 @@
             if (isWin || isDraw) {
                 gameState.gameOver = true;
                 clearHints();
+                stopClock();
                 const isHumanWin = isWin && player === gameState.humanPlayer;
                 document.getElementById('status').innerText = isWin ? (isHumanWin ? '你赢了！' : 'AI 获胜') : '平局';
                 document.getElementById('status').classList.remove('animate-pulse');
@@ -1227,6 +1523,7 @@
             gameState.isAIMoving = false;
             gameState.lastMove = -1;
             gameState.moveHistory = [];
+            resetClocks();
 
             const aiFirst = document.getElementById('aiFirst').checked;
             if (aiFirst) {
@@ -1247,10 +1544,12 @@
             if (aiFirst) {
                 gameState.isAIMoving = true;
                 document.getElementById('status').innerText = 'AI 思考开局...';
+                startClock('ai');
                 aiTimer = setTimeout(aiLogic, 1);
             } else {
                 gameState.isAIMoving = false;
                 document.getElementById('status').innerText = '执黑先行';
+                startClock('human');
                 computeHints();
             }
         }
