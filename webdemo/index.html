@@ -692,6 +692,89 @@
             }
             return [...pts];
         }
+        // 单方向: 落子 cell 后 player 在该方向上的下一步胜点 (对应
+        // _win_points_after_play_dir, 用于双威胁检测)
+        function winPointsAfterMoveDir(b, cell, player, dr, dc) {
+            const pts = [];
+            const r = Math.floor(cell / boardSize), c = cell % boardSize;
+            let cnt = 1;
+            for (const s of [1, -1]) {
+                let nr = r + s * dr, nc = c + s * dc;
+                while (nr >= 0 && nr < boardSize && nc >= 0 && nc < boardSize &&
+                       b[nr * boardSize + nc] === player) {
+                    cnt++;
+                    nr += s * dr;
+                    nc += s * dc;
+                }
+            }
+            if (cnt < 4) return pts;
+            for (const s of [1, -1]) {
+                let nr = r + s * dr, nc = c + s * dc;
+                while (nr >= 0 && nr < boardSize && nc >= 0 && nc < boardSize &&
+                       b[nr * boardSize + nc] === player) {
+                    nr += s * dr;
+                    nc += s * dc;
+                }
+                if (nr >= 0 && nr < boardSize && nc >= 0 && nc < boardSize &&
+                    b[nr * boardSize + nc] === 0) pts.push(nr * boardSize + nc);
+            }
+            return pts;
+        }
+        // 双威胁点: 一手形成 ≥2 条线的强制威胁 (双活三 / 活三+冲四 / 双四),
+        // 对应 Python 的 _find_double_threat_cells。活三线口径与 liveThreeLines
+        // 一致 (简单 3 连两端空), 跳活三组合暂不覆盖。
+        function doubleThreatCells(b, player, cells) {
+            const res = [];
+            const dirs = [[0, 1], [1, 0], [1, 1], [1, -1]];
+            for (const i of cells) {
+                if (b[i] !== 0) continue;
+                const r = Math.floor(i / boardSize), c = i % boardSize;
+                const nb = placeAt(b, i, player);
+                if (makesFiveAt(nb, i, player)) continue;  // 直接连五不算双威胁
+                let threats = 0;
+                for (const [dr, dc] of dirs) {
+                    let cnt = 1;
+                    for (const s of [1, -1]) {
+                        let nr = r + s * dr, nc = c + s * dc;
+                        while (nr >= 0 && nr < boardSize && nc >= 0 && nc < boardSize &&
+                               nb[nr * boardSize + nc] === player) {
+                            cnt++;
+                            nr += s * dr;
+                            nc += s * dc;
+                        }
+                    }
+                    if (cnt >= 4 &&
+                        winPointsAfterMoveDir(nb, i, player, dr, dc).length > 0) {
+                        threats++;
+                        if (threats >= 2) break;
+                    }
+                }
+                if (threats < 2) {
+                    for (const ln of liveThreeLines(nb, player)) {
+                        const e1r = Math.floor(ln.e1 / boardSize), e1c = ln.e1 % boardSize;
+                        const e2r = Math.floor(ln.e2 / boardSize), e2c = ln.e2 % boardSize;
+                        const edx = e2r - e1r, edy = e2c - e1c;
+                        if (!((Math.abs(edx) === 4 && Math.abs(edy) === 0) ||
+                              (Math.abs(edx) === 0 && Math.abs(edy) === 4) ||
+                              (Math.abs(edx) === 4 && Math.abs(edy) === 4))) continue;
+                        const sx = Math.trunc(edx / 4), sy = Math.trunc(edy / 4);
+                        let hit = false;
+                        for (let k = 1; k <= 3; k++) {
+                            if (e1r + k * sx === r && e1c + k * sy === c) {
+                                hit = true;
+                                break;
+                            }
+                        }
+                        if (hit) {
+                            threats++;
+                            if (threats >= 2) break;
+                        }
+                    }
+                }
+                if (threats >= 2) res.push(i);
+            }
+            return res;
+        }
         // player 一步即可连五的空位
         function winPoints(b, player, cells) {
             const pts = [];
@@ -723,7 +806,7 @@
         //   10 = 自己能连五 / 对手立即连五 (必走/必堵)
         //    8 = 自己能形成活四/双四 / 对手活三跳三 (化解其活四点)
         // 按子数快速跳过, 活四点分析只用半径 1 候选
-        function tacticalPrior(b, ai) {
+        function tacticalPrior(b, ai, includeDoubleThreat = true) {
             const hu = 3 - ai;
             const prior = {};
             const aiCount = countStones(b, ai);
@@ -746,6 +829,21 @@
                 const near1 = boardNearCells(b, 1);
                 for (const a of forkCells(b, hu, near1)) {
                     if ((prior[a] || 0) < 8) prior[a] = 8;
+                }
+            }
+            // 双威胁检测较贵, 只在根节点启用 (树内叶子盘面多, 跳过)
+            if (includeDoubleThreat) {
+                if (aiCount >= 3) {
+                    const near1 = boardNearCells(b, 1);
+                    for (const a of doubleThreatCells(b, ai, near1)) {
+                        if ((prior[a] || 0) < 8) prior[a] = 8;
+                    }
+                }
+                if (huCount >= 3) {
+                    const near1 = boardNearCells(b, 1);
+                    for (const a of doubleThreatCells(b, hu, near1)) {
+                        if ((prior[a] || 0) < 8) prior[a] = 8;
+                    }
                 }
             }
             return prior;
@@ -1056,7 +1154,7 @@
                     const boardKey = simBoard.join('');
                     let prior = tacticsCache.get(boardKey);
                     if (prior === undefined) {
-                        prior = tacticalPrior(simBoard, leafPlayer);
+                        prior = tacticalPrior(simBoard, leafPlayer, false);
                         tacticsCache.set(boardKey, prior);
                     }
                     applyTacticalPriorToLogits(leafEval.logits, prior);

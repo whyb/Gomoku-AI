@@ -57,6 +57,7 @@ class SelfPlayWorker:
                  temp_final: float = 0.1,
                  draw_reward: float = 0.0,
                  random_open_moves: int = 0,
+                 raw_selfplay_frac: float = 0.0,
                  use_batch_mcts: bool = True,
                  mcts_batch_size: int = 16,
                  fp16: bool = False,
@@ -76,6 +77,11 @@ class SelfPlayWorker:
             draw_reward: 平局的价值目标 (默认 0.0; 设为负值可让模型厌恶平局、
                          主动求胜, 防止价值头坍缩到 0)
             random_open_moves: 每局随机开局 N 手 (制造不平衡局面, 增加胜负样本)
+            raw_selfplay_frac: 每局以该概率生成"裸棋"对局 (默认 0.0):
+              只保留 立即连五/立即堵五 两条硬规则, 关闭 活四双四/活三防守/
+              双活三堵三端 等防守短路与树内战术先验, 让模型亲身体验
+              "放任对手活三 → 被做成活四/双活三 → 输" 的后果,
+              从而学会预防而不是依赖规则保命。对手池对局中对手仍全力防守。
             use_batch_mcts: 是否使用批量 MCTS
             mcts_batch_size: 批量 MCTS 的 batch 大小
             fp16: MCTS 推理是否使用 FP16 混合精度
@@ -89,6 +95,7 @@ class SelfPlayWorker:
         self.temp_final = temp_final
         self.draw_reward = draw_reward
         self.random_open_moves = random_open_moves
+        self.raw_selfplay_frac = max(0.0, min(1.0, raw_selfplay_frac))
 
         if use_batch_mcts:
             self.mcts = BatchMCTS(
@@ -113,6 +120,15 @@ class SelfPlayWorker:
                 win_condition=win_condition,
                 use_human_knowledge=use_human_knowledge
             )
+
+    def _get_forced_move_level(self, board: np.ndarray, player: int,
+                               tactical_level: int
+                               ) -> Tuple[Optional[int], Optional[str]]:
+        """按战术等级取强制走法: 0=全部规则, >=1=仅 立即连五/立即堵五"""
+        if tactical_level >= 1:
+            return get_forced_move(board, player, self.win_condition,
+                                   max_priority=2)
+        return get_forced_move(board, player, self.win_condition)
 
     def play_one_game(self, game_id: int = 0,
                       opening_moves: Optional[List[Tuple[int, int]]] = None
@@ -141,6 +157,9 @@ class SelfPlayWorker:
                 board[x, y] = player
             start_step = len(opening_moves)
 
+        # 裸棋对局: 本局关闭防守短路与树内战术先验
+        tactical_level = 1 if np.random.random() < self.raw_selfplay_frac else 0
+
         current_player = 1 if start_step % 2 == 0 else 2
         max_steps = self.board_size * self.board_size
         winner = 0
@@ -158,9 +177,9 @@ class SelfPlayWorker:
                 actions = list(range(total_cells))
                 probs = np.full(total_cells, 1.0 / total_cells, dtype=np.float32)
             else:
-                # 规则短路：检查强制走法（立即获胜 / 必须防守）
-                forced_action, reason = get_forced_move(
-                    board, current_player, self.win_condition
+                # 规则短路：检查强制走法（裸棋局仅保留 连五/堵五）
+                forced_action, reason = self._get_forced_move_level(
+                    board, current_player, tactical_level
                 )
                 if forced_action is not None:
                     actions = [forced_action]
@@ -170,7 +189,9 @@ class SelfPlayWorker:
                     actions, probs = self.mcts.search(
                         state, board,
                         temperature=temperature,
-                        add_noise=True
+                        add_noise=True,
+                        use_human_knowledge=(None if tactical_level == 0
+                                             else False)
                     )
 
             # 记录 (state, policy, player)
@@ -324,7 +345,8 @@ class SelfPlayManager:
                  temp_threshold: int = 30,
                  temp_final: float = 0.1,
                  draw_reward: float = 0.0,
-                 random_open_moves: int = 0):
+                 random_open_moves: int = 0,
+                 raw_selfplay_frac: float = 0.0):
         """
         Args:
             model: 当前训练的模型
@@ -341,6 +363,7 @@ class SelfPlayManager:
             c_puct / dirichlet_alpha / dirichlet_epsilon / temp_threshold /
             temp_final / draw_reward / random_open_moves: 探索与奖励参数,
             透传给 SelfPlayWorker (详见其 docstring)
+            raw_selfplay_frac: 裸棋对局比例, 透传给 SelfPlayWorker
         """
         self.model = model
         self.device = device
@@ -360,6 +383,7 @@ class SelfPlayManager:
         self.temp_final = temp_final
         self.draw_reward = draw_reward
         self.random_open_moves = random_open_moves
+        self.raw_selfplay_frac = max(0.0, min(1.0, raw_selfplay_frac))
         self._iter_games = []   # 本轮生成的每局结果 (winner, main_player)
         self.last_stats = None  # 最近一轮 generate_games 的对局统计
         self._opponent_worker_cache = {}  # model_id → SelfPlayWorker 缓存
@@ -377,6 +401,7 @@ class SelfPlayManager:
             temp_final=temp_final,
             draw_reward=draw_reward,
             random_open_moves=random_open_moves,
+            raw_selfplay_frac=self.raw_selfplay_frac,
         )
 
     def update_model(self, model: nn.Module):
@@ -544,6 +569,7 @@ class SelfPlayManager:
                 'temp_final': self.temp_final,
                 'draw_reward': self.draw_reward,
                 'random_open_moves': self.random_open_moves,
+                'raw_selfplay_frac': self.raw_selfplay_frac,
             })
 
         # 并行执行
@@ -655,6 +681,9 @@ class SelfPlayManager:
                 board[x, y] = player
             start_step = len(opening_moves)
 
+        # 裸棋局: 主模型只保留 连五/堵五, 对手仍全力防守 (让主模型被惩罚)
+        tactical_level = 1 if np.random.random() < self.raw_selfplay_frac else 0
+
         current_player = 1
         if start_step % 2 == 1:
             current_player = 2
@@ -672,22 +701,34 @@ class SelfPlayManager:
                 actions = list(range(total_cells))
                 probs = np.full(total_cells, 1.0 / total_cells, dtype=np.float32)
             else:
-                # 规则短路：检查强制走法
-                forced_action, reason = get_forced_move(
-                    board, current_player, self.win_condition
-                )
-                if forced_action is not None:
-                    actions = [forced_action]
-                    probs = np.array([1.0])
-                # 选择当前玩家的 MCTS (主模型可能执 P1 或 P2)
-                elif current_player == main_player:
-                    actions, probs = self.worker.mcts.search(
-                        state, board, temperature=temperature, add_noise=True
+                if current_player == main_player:
+                    # 主模型: 遵守本局的战术等级 (裸棋局无防守短路)
+                    forced_action, reason = self.worker._get_forced_move_level(
+                        board, current_player, tactical_level
                     )
+                    if forced_action is not None:
+                        actions = [forced_action]
+                        probs = np.array([1.0])
+                    else:
+                        actions, probs = self.worker.mcts.search(
+                            state, board, temperature=temperature,
+                            add_noise=True,
+                            use_human_knowledge=(None if tactical_level == 0
+                                                 else False)
+                        )
                 else:
-                    actions, probs = opponent_worker.mcts.search(
-                        state, board, temperature=temperature, add_noise=True
+                    # 对手: 始终全力防守 (规则短路 + 战术先验)
+                    forced_action, reason = get_forced_move(
+                        board, current_player, self.win_condition
                     )
+                    if forced_action is not None:
+                        actions = [forced_action]
+                        probs = np.array([1.0])
+                    else:
+                        actions, probs = opponent_worker.mcts.search(
+                            state, board, temperature=temperature,
+                            add_noise=True
+                        )
 
             # 记录
             full_policy = np.zeros(self.board_size * self.board_size, dtype=np.float32)
@@ -759,6 +800,7 @@ def _cpu_self_play_worker(config: dict) -> list:
     temp_final = config.get('temp_final', 0.1)
     draw_reward = config.get('draw_reward', 0.0)
     random_open_moves = config.get('random_open_moves', 0)
+    raw_selfplay_frac = config.get('raw_selfplay_frac', 0.0)
 
     worker = SelfPlayWorker(
         model, device, board_size, win_condition,
@@ -772,6 +814,7 @@ def _cpu_self_play_worker(config: dict) -> list:
         temp_final=temp_final,
         draw_reward=draw_reward,
         random_open_moves=random_open_moves,
+        raw_selfplay_frac=raw_selfplay_frac,
     )
 
     all_data = []
@@ -801,6 +844,7 @@ def _cpu_self_play_worker(config: dict) -> list:
                 temp_final=temp_final,
                 draw_reward=draw_reward,
                 random_open_moves=random_open_moves,
+                raw_selfplay_frac=raw_selfplay_frac,
             )
 
             # Run opponent game
@@ -839,6 +883,10 @@ def _run_opponent_game(worker1, worker2, board_size, win_condition, game_id):
             board[x, y] = player
         start_step = len(opening_moves)
 
+    # 裸棋局: 主模型只保留 连五/堵五, 对手仍全力防守
+    tactical_level = 1 if _random.random() < getattr(
+        worker1, 'raw_selfplay_frac', 0.0) else 0
+
     current_player = 2 if start_step % 2 == 1 else 1
     max_steps = board_size * board_size
     winner = 0
@@ -854,21 +902,31 @@ def _run_opponent_game(worker1, worker2, board_size, win_condition, game_id):
             actions = list(range(total_cells))
             probs = np.full(total_cells, 1.0 / total_cells, dtype=np.float32)
         else:
-            # 规则短路：检查强制走法
-            forced_action, reason = get_forced_move(
-                board, current_player, win_condition
-            )
-            if forced_action is not None:
-                actions = [forced_action]
-                probs = np.array([1.0])
-            elif current_player == main_player:
-                actions, probs = worker1.mcts.search(
-                    state, board, temperature=temperature, add_noise=True
+            if current_player == main_player:
+                forced_action, reason = worker1._get_forced_move_level(
+                    board, current_player, tactical_level
                 )
+                if forced_action is not None:
+                    actions = [forced_action]
+                    probs = np.array([1.0])
+                else:
+                    actions, probs = worker1.mcts.search(
+                        state, board, temperature=temperature, add_noise=True,
+                        use_human_knowledge=(None if tactical_level == 0
+                                             else False)
+                    )
             else:
-                actions, probs = worker2.mcts.search(
-                    state, board, temperature=temperature, add_noise=True
+                # 对手: 始终全力防守
+                forced_action, reason = get_forced_move(
+                    board, current_player, win_condition
                 )
+                if forced_action is not None:
+                    actions = [forced_action]
+                    probs = np.array([1.0])
+                else:
+                    actions, probs = worker2.mcts.search(
+                        state, board, temperature=temperature, add_noise=True
+                    )
 
         full_policy = np.zeros(board_size * board_size, dtype=np.float32)
         for a, p in zip(actions, probs):

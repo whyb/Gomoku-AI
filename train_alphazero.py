@@ -71,7 +71,6 @@ from teacher import TeacherAI, generate_distill_games
 REPLAY_BUFFER_SIZE = 200000    # Replay buffer 容量
 SAVE_INTERVAL = 2000           # 每 N 步保存一次
 EVAL_INTERVAL = 5000           # 每 N 步评估一次
-GAMES_PER_EVAL = 1             # 评估对局数
 GAMES_PER_ITERATION = 16       # 每次迭代生成的对局数
 L2_COEFF = 1e-4                # L2 正则系数
 GAMMA = 1.0                    # 折扣因子 (AlphaZero 用 1.0, 不折扣)
@@ -1178,6 +1177,7 @@ def train(args):
         temp_final=args.temp_final,
         draw_reward=args.draw_reward,
         random_open_moves=args.random_open_moves,
+        raw_selfplay_frac=args.raw_selfplay_frac,
     )
     self_play_manager.model_class = model_tag  # 告知管理器模型类型 (用于序列化)
 
@@ -1415,7 +1415,7 @@ def train(args):
             if save_reason == 'step':
                 opponent_pool.add_model(
                     model, model_id=f'step_{update_step}',
-                    step=update_step
+                    step=update_step, elo=elo.get_rating('current')
                 )
 
         # ---- 阶段 4: 定期评估 ----
@@ -1430,20 +1430,27 @@ def train(args):
             eval_start = time.time()
             model.eval()
 
-            def mcts_player(state):
-                board = np.zeros((board_size, board_size), dtype=np.int32)
-                board[state[0] == 1] = 1
-                board[state[1] == 1] = 2
-                # 推断当前玩家
-                p1_count = (board == 1).sum()
-                p2_count = (board == 2).sum()
-                current_player = 1 if p1_count == p2_count else 2
-                forced_action, _ = get_forced_move(board, current_player, win_condition)
-                if forced_action is not None:
-                    return [forced_action], np.array([1.0])
-                mcts = MCTS(model, device, num_simulations=100, fp16=args.fp16,
-                            win_condition=win_condition)
-                return mcts.search(state, board, temperature=0.3, add_noise=False)
+            def make_eval_player(m: nn.Module):
+                """构造评估用棋手: 硬规则短路 + 固定 sims MCTS, 无探索噪声"""
+                _mcts = MCTS(m, device, num_simulations=args.eval_sims,
+                             fp16=args.fp16, win_condition=win_condition)
+
+                def player_fn(state):
+                    board = np.zeros((board_size, board_size), dtype=np.int32)
+                    board[state[0] == 1] = 1
+                    board[state[1] == 1] = 2
+                    p1_count = (board == 1).sum()
+                    p2_count = (board == 2).sum()
+                    current_player = 1 if p1_count == p2_count else 2
+                    forced_action, _ = get_forced_move(
+                        board, current_player, win_condition)
+                    if forced_action is not None:
+                        return [forced_action], np.array([1.0])
+                    return _mcts.search(state, board, temperature=0.3,
+                                        add_noise=False)
+                return player_fn
+
+            main_player_fn = make_eval_player(model)
 
             def random_player(state):
                 valid = []
@@ -1454,25 +1461,83 @@ def train(args):
                 probs = np.ones(len(valid)) / len(valid)
                 return valid, probs
 
-            result = arena.play_match(mcts_player, random_player,
-                                      num_games=GAMES_PER_EVAL)
+            # 固定开局 (与部署/对弈场景一致, 首手随机 + 书式续走)
+            book_openings = OpeningBook.get_openings_for_size(board_size)
+            book_openings = list(book_openings.values()) if book_openings else None
+
+            eval_games = max(1, args.eval_games)
+            if args.eval_opponent == 'pool' and len(opponent_pool.pool) > 0:
+                eval_mode = 'pool'
+            else:
+                eval_mode = 'random'
+
+            wins = losses = ties = 0
+            first_wins = first_games = second_wins = second_games = 0
+            opp_player_cache = {}  # opp_id -> player_fn (复用 MCTS 包装)
+
+            for g in range(eval_games):
+                if eval_mode == 'pool':
+                    opp_model = opponent_pool.sample_opponent(device=device)
+                    opp_id = opponent_pool._last_selected_id or 'pool'
+                    if opp_id not in opp_player_cache:
+                        opp_player_cache[opp_id] = make_eval_player(opp_model)
+                    opp_fn = opp_player_cache[opp_id]
+                else:
+                    opp_id = 'random'
+                    opp_fn = random_player
+
+                opening = (book_openings[g % len(book_openings)]
+                           if book_openings else None)
+                # 交替先后手: 偶数局主模型先手, 奇数局对手先手
+                if g % 2 == 0:
+                    winner = arena.play_game(main_player_fn, opp_fn,
+                                             opening=opening, temperature=0.3)
+                    first_games += 1
+                    if winner == 1:
+                        wins += 1
+                        first_wins += 1
+                    elif winner == 2:
+                        losses += 1
+                    else:
+                        ties += 1
+                    cur_won = winner == 1
+                else:
+                    winner = arena.play_game(opp_fn, main_player_fn,
+                                             opening=opening, temperature=0.3)
+                    second_games += 1
+                    if winner == 2:
+                        wins += 1
+                        second_wins += 1
+                    elif winner == 1:
+                        losses += 1
+                    else:
+                        ties += 1
+                    cur_won = winner == 2
+
+                # 按单局真实结果更新 Elo (不再对 random 重复刷分)
+                if winner == 0:
+                    elo.update('current', opp_id, tie=True)
+                elif cur_won:
+                    elo.update('current', opp_id)
+                else:
+                    elo.update(opp_id, 'current')
+
+            p1_win_rate = wins / eval_games
+            tie_rate = ties / eval_games
+            first_rate = first_wins / first_games if first_games else 0.0
+            second_rate = second_wins / second_games if second_games else 0.0
             eval_time = time.time() - eval_start
-            print(f"  [评估] vs 随机: 胜率={result['p1_win_rate']:.1%} "
-                  f"(先手={result['p1_first_win_rate']:.1%}, "
-                  f"后手={result['p1_second_win_rate']:.1%}) | "
-                  f"评估耗时 {eval_time:.1f}s")
+            print(f"  [评估] vs {eval_mode}: 胜率={p1_win_rate:.1%} "
+                  f"(先手={first_rate:.1%}, 后手={second_rate:.1%}, "
+                  f"平={tie_rate:.1%}) | {eval_games} 局 | "
+                  f"耗时 {eval_time:.1f}s | current Elo="
+                  f"{elo.get_rating('current'):.0f}")
 
             if writer is not None:
-                writer.add_scalar('mcts/eval_win_rate', result['p1_win_rate'], update_step)
-                writer.add_scalar('mcts/eval_win_rate_first', result['p1_first_win_rate'], update_step)
-                writer.add_scalar('mcts/eval_win_rate_second', result['p1_second_win_rate'], update_step)
-
-            # 更新 Elo
-            for _ in range(10):
-                if result['p1_win_rate'] > 0.5:
-                    elo.update('current', 'random')
-                else:
-                    elo.update('random', 'current')
+                writer.add_scalar('mcts/eval_win_rate', p1_win_rate, update_step)
+                writer.add_scalar('mcts/eval_win_rate_first', first_rate, update_step)
+                writer.add_scalar('mcts/eval_win_rate_second', second_rate, update_step)
+                writer.add_scalar('mcts/eval_tie_rate', tie_rate, update_step)
             eval_ran = True
 
             # --- MCTS 崩溃检测 & 最佳模型 ---
@@ -1611,20 +1676,21 @@ def train(args):
         print("\n训练期间未触发评估，退出前强制评估...")
         model.eval()
 
+        final_mcts = MCTS(model, device, num_simulations=args.eval_sims,
+                          fp16=args.fp16, win_condition=win_condition)
+
         def mcts_player_final(state):
             board = np.zeros((board_size, board_size), dtype=np.int32)
             board[state[0] == 1] = 1
             board[state[1] == 1] = 2
-            # 推断当前玩家
             p1_count = (board == 1).sum()
             p2_count = (board == 2).sum()
             current_player = 1 if p1_count == p2_count else 2
             forced_action, _ = get_forced_move(board, current_player, win_condition)
             if forced_action is not None:
                 return [forced_action], np.array([1.0])
-            mcts = MCTS(model, device, num_simulations=100, fp16=args.fp16,
-                        win_condition=win_condition)
-            return mcts.search(state, board, temperature=0.3, add_noise=False)
+            return final_mcts.search(state, board, temperature=0.3,
+                                     add_noise=False)
 
         def random_player_final(state):
             valid = []
@@ -1636,11 +1702,12 @@ def train(args):
             return valid, probs
 
         result = arena.play_match(mcts_player_final, random_player_final,
-                                  num_games=GAMES_PER_EVAL)
+                                  num_games=max(1, args.eval_games))
         print(f"  [最终评估] vs 随机: 胜率={result['p1_win_rate']:.1%} "
               f"(先手={result['p1_first_win_rate']:.1%}, "
-              f"后手={result['p1_second_win_rate']:.1%})")
-        for _ in range(10):
+              f"后手={result['p1_second_win_rate']:.1%}, "
+              f"平={result['tie_rate']:.1%})")
+        for _ in range(max(1, args.eval_games)):
             if result['p1_win_rate'] > 0.5:
                 elo.update('current', 'random')
             else:
@@ -1730,6 +1797,23 @@ def main():
     parser.add_argument('--random_open_moves', type=int, default=0,
                         help='每局随机开局 N 手 (默认 0; 建议 4~12, '
                              '制造不平衡局面, 增加胜负样本与战法多样性)')
+    parser.add_argument('--raw_selfplay_frac', type=float, default=0.0,
+                        help='裸棋自对弈比例 0~1 (默认 0.0; 建议 0.1~0.3)。'
+                             '该比例的对局中主模型只保留 立即连五/立即堵五 '
+                             '两条硬规则, 关闭 活四双四/活三防守/双活三堵三端 '
+                             '与树内战术先验, 让模型亲身经历放任对手活三/'
+                             '双活三而被杀的后果, 从而学会主动预防; '
+                             '对手池对局中对手仍全力防守。')
+    parser.add_argument('--eval_games', type=int, default=20,
+                        help='每次周期评估的对局数 (默认 20; 原为 1 局 vs 随机, '
+                             '样本太少且无参考价值)')
+    parser.add_argument('--eval_opponent', type=str, default='pool',
+                        choices=['pool', 'random'],
+                        help='周期评估对手: pool=从对手池采样历史模型 '
+                             '(默认, 更能反映真实棋力); '
+                             'random=随机棋手 (仅作冒烟测试)')
+    parser.add_argument('--eval_sims', type=int, default=100,
+                        help='周期评估时每步 MCTS 模拟次数 (默认 100)')
     parser.add_argument('--save_interval_hours', type=float, default=1.0,
                         help='自动保存间隔 (小时, 默认 1.0, 设为 0 禁用)')
     parser.add_argument('--log_dir', type=str, default='runs',
