@@ -19,6 +19,7 @@ from dataclasses import dataclass
 
 from mcts import MCTS, BatchMCTS, get_forced_move
 from symmetry import SymmetryAugmenter
+from win_reason import reconstruct_game
 
 
 @dataclass
@@ -421,12 +422,17 @@ class SelfPlayManager:
             data = self._generate_games_parallel(num_games)
         else:
             data = self._generate_games_sequential(num_games)
+        self.last_games = []             # 本轮对局摘要 (胜因打印用)
         self._compute_stats(num_games)
         return data
 
-    def _record_game(self, winner: int, main_player: int):
-        """记录一局结果用于 TensorBoard 统计"""
-        self._iter_games.append((winner, main_player))
+    def _record_game(self, winner: int, main_player: int, summary=None):
+        """记录一局结果用于 TensorBoard 统计与胜因打印
+
+        summary: win_reason.WinGameSummary 或 None (平局/无法重建),
+                 供 train_alphazero.py 打印 P1/P2 的胜因。
+        """
+        self._iter_games.append((winner, main_player, summary))
 
     def _compute_stats(self, num_games: int) -> dict:
         """
@@ -444,7 +450,7 @@ class SelfPlayManager:
             'main_first_games': 0, 'main_first_wins': 0,
             'main_second_games': 0, 'main_second_wins': 0,
         }
-        for winner, main_player in games:
+        for winner, main_player, _summary in games:
             if winner == 0:
                 stats['ties'] += 1
             if main_player == 0:
@@ -477,6 +483,7 @@ class SelfPlayManager:
             stats['main_first_wins'], stats['main_first_games'])
         stats['main_second_win_rate'] = rate(
             stats['main_second_wins'], stats['main_second_games'])
+        self.last_games = games          # 供 train_alphazero.py 打印每局胜因
         self._iter_games = []
         self.last_stats = stats
         return stats
@@ -497,7 +504,10 @@ class SelfPlayManager:
             else:
                 game_result = self.worker.play_one_game(game_id=self.game_count)
                 opponent_type = 'self'
-            self._record_game(game_result.winner, game_result.main_player)
+            # 胜因摘要: 仅非平局需要重建 (平局直接跳过)
+            summary = reconstruct_game(game_result, self.win_condition)
+            self._record_game(game_result.winner, game_result.main_player,
+                              summary)
 
             game_time = time.time() - game_start
             self.game_count += 1
@@ -584,8 +594,8 @@ class SelfPlayManager:
                 try:
                     data, results = future.result()
                     all_data.extend(data)
-                    for winner, main_player in results:
-                        self._record_game(winner, main_player)
+                    for winner, main_player, summary in results:
+                        self._record_game(winner, main_player, summary)
                     completed_games += 1
                     if completed_games % 5 == 0:
                         print(f"    [Parallel] {completed_games}/{num_games} games done, "
@@ -853,7 +863,8 @@ def _cpu_self_play_worker(config: dict) -> list:
             )
         else:
             game_result = worker.play_one_game(game_id=game_id)
-        results.append((game_result.winner, game_result.main_player))
+        summary = reconstruct_game(game_result, win_condition)
+        results.append((game_result.winner, game_result.main_player, summary))
 
         # 转换为训练数据 (不做对称增强)
         data = worker.generate_training_data(game_result, augment_symmetry=False)

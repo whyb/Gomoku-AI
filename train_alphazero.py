@@ -64,6 +64,7 @@ from elo import EloRating
 from arena import Arena
 from opening_book import OpeningBook
 from teacher import TeacherAI, generate_distill_games
+import win_reason
 
 # ============================================================
 # 常量 (基准测试最优值: AMD RX 7900 XTX / RTX 3060 Ti)
@@ -1342,6 +1343,11 @@ def train(args):
         raw_steps = num_samples_this_iter
         avg_game_len = raw_steps / max(1, num_games_this_iter)
         sp_stats = self_play_manager.last_stats or {}   # 本轮对局胜负统计
+        # 打印本轮每局胜因 (P1/P2 如何获胜; 平局不打印)
+        win_reason.print_win_reasons(
+            getattr(self_play_manager, 'last_games', None) or [],
+            win_condition,
+        )
 
         total_games += num_games_this_iter
         total_samples += num_samples_this_iter
