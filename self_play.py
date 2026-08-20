@@ -502,7 +502,9 @@ class SelfPlayManager:
                 game_result = self._play_against_opponent(opponent_model, opponent_id)
                 opponent_type = 'history'
             else:
-                game_result = self.worker.play_one_game(game_id=self.game_count)
+                # game_id 使用 1-based 编号 (game_count+1), 与下方打印的 "Game N" 对齐,
+                # 保证 win_reason.print_win_reasons 输出的 [胜因] Game N 与对局日志一致
+                game_result = self.worker.play_one_game(game_id=self.game_count + 1)
                 opponent_type = 'self'
             # 胜因摘要: 仅非平局需要重建 (平局直接跳过)
             summary = reconstruct_game(game_result, self.win_condition)
@@ -553,7 +555,8 @@ class SelfPlayManager:
         # 构建每个 game 的配置
         configs = []
         for i in range(num_games):
-            game_id = self.game_count + i
+            # 1-based 编号, 与串行模式的 "Game N" 打印保持一致
+            game_id = self.game_count + i + 1
             opp_dict = None
 
             opponent_model, opponent_id = self._select_opponent()
@@ -760,7 +763,7 @@ class SelfPlayManager:
             current_player = 3 - current_player
 
         return GameResult(winner=winner, steps=steps, total_moves=len(steps),
-                         game_id=self.game_count, main_player=main_player)
+                         game_id=self.game_count + 1, main_player=main_player)
 
 
 # ============================================================
