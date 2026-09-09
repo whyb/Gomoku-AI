@@ -478,6 +478,7 @@ python export_onnx_az.py alpaz_standard_15x15_model.pth --board_size 15 --model 
 ## Projects using Gomoku-AI
 * [基于alphazero的TW对弈插件](https://www.bilibili.com/video/BV1V5cozPELG/)
 * [五子棋落子建议网站](https://github.com/tkgg18201760958/WuZi)
+* [五子棋5×5 must5src](https://github.com/732857315/must5src)
 
 ## 欢迎贡献
 
