@@ -144,6 +144,20 @@
             .clock-chip.clock-active { @apply text-secondary; }
             .clock-chip.clock-idle { @apply opacity-40; }
 
+            /* i18n: allow longer labels to wrap without widening the control row */
+            label.i18n-wrap-label { min-width: 0; }
+            label.i18n-wrap-label > span[data-i18n] {
+                min-width: 0;
+                line-height: 1.25;
+                overflow-wrap: anywhere;
+            }
+            button.i18n-action {
+                max-width: 100%;
+                white-space: normal;
+                text-align: center;
+                line-height: 1.25;
+            }
+
             /* 移动端交互优化: 消除点击高亮闪烁与 300ms 双击缩放延迟 */
             button, select, input[type="checkbox"], label, .intersect-point {
                 touch-action: manipulation;
@@ -170,12 +184,12 @@
     <div class="w-full max-w-[600px] sm:max-w-[680px] lg:max-w-[760px] mb-4 flex flex-col gap-4">
         <div class="flex justify-between items-start px-2">
             <div>
-                <h1 class="text-2xl md:text-3xl font-serif font-bold tracking-tight">五子棋 <span class="text-secondary font-sans">AI</span></h1>
+                <h1 class="text-2xl md:text-3xl font-serif font-bold tracking-tight"><span data-i18n="pageTitle">五子棋</span> <span class="text-secondary font-sans">AI</span></h1>
                 <p class="text-[10px] uppercase tracking-[0.2em] opacity-50 text-line">Professional ResNet Engine</p>
             </div>
             <a href="https://github.com/whyb/Gomoku-AI/" target="_blank" class="flex items-center gap-2 bg-white/40 px-3 py-2 sm:py-1.5 rounded-full border border-white/60 hover:bg-white/80 transition-all shadow-sm">
                 <i class="fa fa-github text-lg"></i>
-                <span class="text-xs font-bold hidden sm:inline">关于本项目</span>
+                <span class="text-xs font-bold hidden sm:inline" data-i18n="aboutProject">关于本项目</span>
             </a>
         </div>
         
@@ -183,16 +197,16 @@
             <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
                 <div class="flex items-center gap-2">
                     <div class="w-4 h-4 rounded-full piece-black shadow-sm"></div>
-                    <span id="labelP1" class="text-xs font-bold">玩家(黑)</span>
+                    <span id="labelP1" class="text-xs font-bold" data-i18n="playerBlack">玩家(黑)</span>
                 </div>
                 <div class="flex items-center gap-2">
                     <div class="w-4 h-4 rounded-full piece-white shadow-sm"></div>
-                    <span id="labelP2" class="text-xs font-bold">AI(白)</span>
+                    <span id="labelP2" class="text-xs font-bold" data-i18n="aiWhite">AI(白)</span>
                 </div>
             </div>
             <div class="flex flex-wrap items-center gap-x-3 gap-y-2 justify-start sm:justify-end">
-                <label class="flex items-center gap-1.5">
-                    <span class="text-xs sm:text-[11px] font-medium">棋盘大小</span>
+                <label class="flex items-center gap-1.5 i18n-wrap-label">
+                    <span class="text-xs sm:text-[11px] font-medium" data-i18n="boardSize">棋盘大小</span>
                     <select id="boardSize" class="bg-white/70 border border-gray-300 rounded-md text-xs sm:text-[11px] px-2 py-1.5 sm:px-1.5 sm:py-1 focus:ring-secondary focus:border-secondary">
                         <option value="5">5</option>
                         <option value="6">6</option>
@@ -207,39 +221,39 @@
                         <option value="15" selected>15</option>
                     </select>
                 </label>
-                <label class="flex items-center cursor-pointer gap-2">
+                <label class="flex items-center cursor-pointer gap-2 i18n-wrap-label">
                     <input type="checkbox" id="aiFirst" class="w-5 h-5 sm:w-4 sm:h-4 rounded border-gray-300 text-secondary focus:ring-secondary" checked>
-                    <span class="text-xs sm:text-[11px] font-medium">AI先手</span>
+                    <span class="text-xs sm:text-[11px] font-medium" data-i18n="aiFirst">AI先手</span>
                 </label>
-                <label class="flex items-center cursor-pointer gap-2">
+                <label class="flex items-center cursor-pointer gap-2 i18n-wrap-label">
                     <input type="checkbox" id="hintEnabled" class="w-5 h-5 sm:w-4 sm:h-4 rounded border-gray-300 text-secondary focus:ring-secondary">
-                    <span class="text-xs sm:text-[11px] font-medium">落子提示</span>
+                    <span class="text-xs sm:text-[11px] font-medium" data-i18n="moveHints">落子提示</span>
                 </label>
-                <label class="flex items-center cursor-pointer gap-2">
+                <label class="flex items-center cursor-pointer gap-2 i18n-wrap-label">
                     <input type="checkbox" id="moveOrder" class="w-5 h-5 sm:w-4 sm:h-4 rounded border-gray-300 text-secondary focus:ring-secondary" checked>
-                    <span class="text-xs sm:text-[11px] font-medium">落子顺序</span>
+                    <span class="text-xs sm:text-[11px] font-medium" data-i18n="moveOrder">落子顺序</span>
                 </label>
-                <label class="flex items-center cursor-pointer gap-2" title="开启后 AI 每步使用 400 次蒙特卡洛树搜索（MCTS），棋力更强但思考更久">
+                <label class="flex items-center cursor-pointer gap-2 i18n-wrap-label" title="开启后 AI 每步使用 400 次蒙特卡洛树搜索（MCTS），棋力更强但思考更久" data-i18n-title="mctsTooltip">
                     <input type="checkbox" id="mctsEnabled" class="w-5 h-5 sm:w-4 sm:h-4 rounded border-gray-300 text-secondary focus:ring-secondary">
-                    <span class="text-xs sm:text-[11px] font-medium">MCTS 思考</span>
+                    <span class="text-xs sm:text-[11px] font-medium" data-i18n="mctsThinking">MCTS 思考</span>
                 </label>
                 <div class="h-4 w-px bg-gray-300 mx-1 hidden sm:block"></div>
-                <button id="undo" class="bg-amber-100 text-amber-800 border border-amber-500 text-xs sm:text-[11px] px-3.5 py-2 sm:px-3 sm:py-1.5 rounded-lg hover:bg-amber-500 hover:text-white transition-colors shadow-sm whitespace-nowrap">
+                <button id="undo" class="i18n-action bg-amber-100 text-amber-800 border border-amber-500 text-xs sm:text-[11px] px-3.5 py-2 sm:px-3 sm:py-1.5 rounded-lg hover:bg-amber-500 hover:text-white transition-colors shadow-sm whitespace-nowrap" data-i18n="undo">
                     悔棋
                 </button>
-                <button id="restart" class="bg-primary text-white text-xs sm:text-[11px] px-3.5 py-2 sm:px-3 sm:py-1.5 rounded-lg hover:bg-secondary transition-colors shadow-sm whitespace-nowrap">
+                <button id="restart" class="i18n-action bg-primary text-white text-xs sm:text-[11px] px-3.5 py-2 sm:px-3 sm:py-1.5 rounded-lg hover:bg-secondary transition-colors shadow-sm whitespace-nowrap" data-i18n="resetGame">
                     重置游戏
                 </button>
             </div>
         </div>
         
-        <div id="status" class="text-center text-xs font-bold tracking-widest text-secondary uppercase animate-pulse">
+        <div id="status" class="text-center text-xs font-bold tracking-widest text-secondary uppercase animate-pulse" data-i18n="initializing">
             正在初始化引擎...
         </div>
         <div class="mt-1.5 flex items-center justify-center gap-3 text-xs font-mono font-bold tracking-widest text-primary/60 select-none">
             <span id="clockAi" class="clock-chip clock-idle">AI 00:00</span>
             <span class="opacity-30">·</span>
-            <span id="clockHuman" class="clock-chip clock-idle">玩家 00:00</span>
+            <span id="clockHuman" class="clock-chip clock-idle" data-i18n="playerClockInitial">玩家 00:00</span>
         </div>
     </div>
 
@@ -252,14 +266,14 @@
     <div id="resultModal" class="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-6 hidden">
         <div class="bg-white rounded-2xl p-8 max-w-xs w-full text-center shadow-2xl transform transition-all scale-110">
             <div id="resultIcon" class="text-5xl mb-4">🏆</div>
-            <h3 id="resultTitle" class="text-2xl font-bold mb-2">恭喜获胜！</h3>
-            <p id="resultMsg" class="text-sm text-gray-500 mb-8">这场对弈非常精彩。</p>
+            <h3 id="resultTitle" class="text-2xl font-bold mb-2" data-i18n="resultWinTitle">恭喜获胜！</h3>
+            <p id="resultMsg" class="text-sm text-gray-500 mb-8" data-i18n="resultWinMsg">这场对弈非常精彩。</p>
             <div class="flex flex-col gap-3">
-                <button id="btnPlayAgain" class="w-full bg-secondary text-white py-3 rounded-xl font-bold hover:brightness-110 transition-all shadow-lg">再来一把</button>
-                <button id="btnCloseResult" class="w-full bg-gray-100 text-gray-600 py-3 rounded-xl font-bold hover:bg-gray-200 transition-all">关闭</button>
+                <button id="btnPlayAgain" class="w-full bg-secondary text-white py-3 rounded-xl font-bold hover:brightness-110 transition-all shadow-lg" data-i18n="playAgain">再来一把</button>
+                <button id="btnCloseResult" class="w-full bg-gray-100 text-gray-600 py-3 rounded-xl font-bold hover:bg-gray-200 transition-all" data-i18n="close">关闭</button>
                 
                 <a href="https://github.com/whyb/Gomoku-AI/" target="_blank" class="mt-2 text-[11px] text-gray-400 hover:text-secondary underline underline-offset-4">
-                    <i class="fa fa-code mr-1"></i>查看开源代码
+                    <i class="fa fa-code mr-1"></i><span data-i18n="viewSource">查看开源代码</span>
                 </a>
             </div>
         </div>
@@ -271,11 +285,172 @@
 
     <div id="loading" class="fixed inset-0 bg-white/90 z-50 flex flex-col items-center justify-center">
         <div class="w-12 h-12 border-4 border-secondary border-t-transparent rounded-full animate-spin"></div>
-        <p class="mt-4 text-sm font-bold tracking-widest text-primary/60">AI引擎加载中...</p>
+        <p class="mt-4 text-sm font-bold tracking-widest text-primary/60" data-i18n="loadingEngine">AI引擎加载中...</p>
         <p id="loadingDetail" class="mt-2 text-[11px] font-mono text-gray-400"></p>
     </div>
 
     <script>
+
+        // ---------- 轻量 i18n: 浏览器语言决定界面语言 ----------
+        const I18N = {
+            zh: {
+                documentTitle: "五子棋AI",
+                pageTitle: "五子棋",
+                aboutProject: "关于本项目",
+                playerBlack: "玩家(黑)",
+                aiWhite: "AI(白)",
+                aiBlack: "AI(黑)",
+                playerWhite: "玩家(白)",
+                boardSize: "棋盘大小",
+                aiFirst: "AI先手",
+                moveHints: "落子提示",
+                moveOrder: "落子顺序",
+                mctsThinking: "MCTS 思考",
+                mctsTooltip: "开启后 AI 每步使用 400 次蒙特卡洛树搜索（MCTS），棋力更强但思考更久",
+                undo: "悔棋",
+                resetGame: "重置游戏",
+                initializing: "正在初始化引擎...",
+                playerClockInitial: "玩家 00:00",
+                resultWinTitle: "恭喜获胜！",
+                resultWinMsg: "这场对弈非常精彩。",
+                playAgain: "再来一把",
+                close: "关闭",
+                viewSource: "查看开源代码",
+                loadingEngine: "AI引擎加载中...",
+                playerClock: "玩家",
+                aiThinking: "AI 正在思考...",
+                aiMctsThinking: "AI MCTS 思考中...",
+                yourTurn: "请落子...",
+                aiEngineError: "AI 引擎异常",
+                aiOpening: "AI 思考开局...",
+                blackFirst: "执黑先行",
+                youWin: "你赢了！",
+                aiWins: "AI 获胜",
+                draw: "平局",
+                humanWinTitle: "你太厉害了！",
+                aiWinTitle: "哈哈你输了！",
+                humanWinMsg: "在对阵AI中获得了胜利。",
+                aiWinMsg: "继续努力吧！",
+                drawTitle: "握手言和",
+                drawMsg: "双方棋力相当。",
+                mobileLoadFailed: "手机端加载失败",
+                engineLoadFailed: "引擎加载失败",
+                tryingBackend: "尝试后端 {ep} ({attempt}/{attempts})...",
+                loadTimeout: "加载超时(30s)，请检查网络或刷新重试",
+                allBackendsFailed: "所有推理后端均加载失败。最后错误: {error}",
+                suggestionAllBackends: "所有推理后端均不可用，请使用最新版 Chrome/Safari，并确认页面通过 http(s) 服务器访问（勿直接用 file:// 打开）。",
+                suggestionMemory: "当前手机内存不足，或因浏览器限制，请尝试关闭后台应用后刷新或更换浏览器。",
+                suggestionTimeout: "下载模型超时，请切换VPN重试。",
+                suggestionWasm: "浏览器版本过低，请使用最新版 Chrome 或 Firefox 打开。",
+                suggestionGeneric: "请复制下方错误信息反馈给开发者：",
+                noStack: "无堆栈信息",
+                mobileReloadSuggestion: "✅ 建议使用 Android Chrome 或 iOS Safari 最新版",
+                reload: "🔄 重新加载",
+                chromiumDirectOpenTitle: "如果你是通过双击 index.html 直接打开的：",
+                chromiumDirectOpenInstructions: "浏览器会禁止本地文件读取 AI 模型，请<b>完全退出 {browser}</b> 后，在终端/命令行运行以下命令启动：",
+                chromiumDirectOpenAlternative: "或者使用 VS Code <b>Live Server</b> 插件，或执行 <code class='text-gray-700'>python -m http.server</code> 启动本地服务器后访问。",
+                firefoxDirectOpenTitle: "如果你是通过双击 index.html 直接打开的：",
+                firefoxIntro: "Firefox 有一个隐藏的 <b>about:config</b> 配置项，专门用来解除 file:// 协议下的跨域限制，<b>这是 Firefox 比 Edge/Chrome 更友好的地方</b>：",
+                firefoxStep1: "在 Firefox 地址栏输入 <code class='bg-gray-100 px-1 rounded'>about:config</code> 并回车",
+                firefoxStep2: "点击 <b>“接受风险并继续”</b>（如果出现警告页面）",
+                firefoxStep3: "在搜索框输入 <code class='bg-gray-100 px-1 rounded'>privacy.file_unique_origin</code>",
+                firefoxStep4: "你会看到该值为 <b>true</b>（默认），<b>双击它，将其切换为 false</b>",
+                firefoxStep5: "关闭该标签页，<b>重启 Firefox</b>",
+                firefoxStep6: "再次双击你的 index.html，此时 fetch 本地 model_bs15_win5.onnx 将<b>不再报 CORS 错误</b>，模型可以正常加载",
+                firefoxWarning: "⚠️ <b>注意</b>：此设置会让本地 file:// 页面可以互相访问文件，有一定安全隐患（恶意本地 HTML 文件可读取你的本地文件）。建议调试完成后，<b>记得把该值改回 true</b>。",
+            },
+            en: {
+                documentTitle: "Gomoku AI",
+                pageTitle: "Gomoku",
+                aboutProject: "About this project",
+                playerBlack: "Player (Black)",
+                aiWhite: "AI (White)",
+                aiBlack: "AI (Black)",
+                playerWhite: "Player (White)",
+                boardSize: "Board Size",
+                aiFirst: "AI First",
+                moveHints: "Move Hints",
+                moveOrder: "Move Order",
+                mctsThinking: "MCTS Thinking",
+                mctsTooltip: "When enabled, the AI uses 400 Monte Carlo Tree Search (MCTS) simulations per move. Stronger play, but slower responses.",
+                undo: "Undo",
+                resetGame: "Reset Game",
+                initializing: "Initializing engine...",
+                playerClockInitial: "Player 00:00",
+                resultWinTitle: "You Win!",
+                resultWinMsg: "Great game!",
+                playAgain: "Play Again",
+                close: "Close",
+                viewSource: "View source code",
+                loadingEngine: "Loading AI engine...",
+                playerClock: "Player",
+                aiThinking: "AI is thinking...",
+                aiMctsThinking: "AI MCTS thinking...",
+                yourTurn: "Your turn...",
+                aiEngineError: "AI engine error",
+                aiOpening: "AI is opening...",
+                blackFirst: "Black moves first",
+                youWin: "You win!",
+                aiWins: "AI wins",
+                draw: "Draw",
+                humanWinTitle: "Excellent!",
+                aiWinTitle: "You lost!",
+                humanWinMsg: "You defeated the AI.",
+                aiWinMsg: "Keep practicing!",
+                drawTitle: "It's a draw",
+                drawMsg: "Both sides are evenly matched.",
+                mobileLoadFailed: "Mobile Load Failed",
+                engineLoadFailed: "Engine Load Failed",
+                tryingBackend: "Trying {ep} backend ({attempt}/{attempts})...",
+                loadTimeout: "Loading timed out after 30s. Check your connection or refresh to try again.",
+                allBackendsFailed: "All inference backends failed to load. Last error: {error}",
+                suggestionAllBackends: "No inference backend is available. Use the latest Chrome/Safari and make sure the page is served over http(s), not opened directly via file://.",
+                suggestionMemory: "The device may be low on memory or the browser may be limiting the model. Close background apps, then refresh or try another browser.",
+                suggestionTimeout: "The model download timed out. Check your VPN or network and try again.",
+                suggestionWasm: "Your browser version is too old. Open the page in the latest Chrome or Firefox.",
+                suggestionGeneric: "Copy the error information below and report it to the developer:",
+                noStack: "No stack trace available",
+                mobileReloadSuggestion: "✅ Use the latest Android Chrome or iOS Safari",
+                reload: "🔄 Reload",
+                chromiumDirectOpenTitle: "If you opened index.html by double-clicking it:",
+                chromiumDirectOpenInstructions: "The browser blocks local file access for AI models. Fully quit {browser}, then run this command in a terminal:",
+                chromiumDirectOpenAlternative: "Alternatively, use the VS Code <b>Live Server</b> extension, or run <code class='text-gray-700'>python -m http.server</code> to start a local server.",
+                firefoxDirectOpenTitle: "If you opened index.html by double-clicking it:",
+                firefoxIntro: "Firefox has a hidden <b>about:config</b> option that removes cross-origin restrictions for the file:// protocol. <b>This makes Firefox friendlier than Edge/Chrome for local files</b>:",
+                firefoxStep1: "Enter <code class='bg-gray-100 px-1 rounded'>about:config</code> in the Firefox address bar and press Enter",
+                firefoxStep2: "Click <b>“Accept the Risk and Continue”</b> if a warning page appears",
+                firefoxStep3: "Search for <code class='bg-gray-100 px-1 rounded'>privacy.file_unique_origin</code>",
+                firefoxStep4: "The value will be <b>true</b> by default. <b>Double-click it to switch it to false</b>",
+                firefoxStep5: "Close the tab and <b>restart Firefox</b>",
+                firefoxStep6: "Open your index.html again. Fetching the local model_bs15_win5.onnx file will <b>no longer trigger a CORS error</b>, and the model can load normally",
+                firefoxWarning: "⚠️ <b>Note</b>: This setting lets local file:// pages access each other's files and introduces a security risk (malicious local HTML files can read local files). After debugging, <b>remember to switch it back to true</b>.",
+            }
+        };
+
+        const browserLanguage = (navigator.language || navigator.userLanguage || '').toLowerCase();
+        const locale = browserLanguage.startsWith('zh') ? 'zh' : 'en';
+
+        function t(key, params) {
+            const values = params || {};
+            const template = (I18N[locale] && I18N[locale][key]) || (I18N.zh && I18N.zh[key]) || key;
+            return template.replace(/\{(\w+)\}/g, (match, name) =>
+                Object.prototype.hasOwnProperty.call(values, name) ? String(values[name]) : match
+            );
+        }
+
+        function applyI18n() {
+            document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
+            document.title = t('documentTitle');
+            document.querySelectorAll('[data-i18n]').forEach(el => {
+                el.textContent = t(el.dataset.i18n);
+            });
+            document.querySelectorAll('[data-i18n-title]').forEach(el => {
+                el.title = t(el.dataset.i18nTitle);
+            });
+        }
+
+        applyI18n();
+
         let boardSize = 15;
         let boardSquare = boardSize * boardSize;
         let aiTimer = null;   // AI 思考定时器 (悔棋/重置时取消)
@@ -309,7 +484,7 @@
             const huEl = document.getElementById('clockHuman');
             if (!aiEl || !huEl) return;
             aiEl.textContent = `AI ${formatClock(clockState.aiMs)}`;
-            huEl.textContent = `玩家 ${formatClock(clockState.humanMs)}`;
+            huEl.textContent = `${t('playerClock')} ${formatClock(clockState.humanMs)}`;
             aiEl.classList.toggle('clock-active', clockState.active === 'ai');
             aiEl.classList.toggle('clock-idle', clockState.active !== 'ai');
             huEl.classList.toggle('clock-active', clockState.active === 'human');
@@ -541,7 +716,7 @@
             if (checkGameOver(gameState.humanPlayer)) return;
 
             gameState.isAIMoving = true;
-            document.getElementById('status').innerText = 'AI 正在思考...';
+            document.getElementById('status').innerText = t('aiThinking');
             startClock('ai');
             aiTimer = setTimeout(aiLogic, 1);
         }
@@ -1248,7 +1423,7 @@
                         const useMcts = document.getElementById('mctsEnabled').checked &&
                                         stonesOnBoard >= MCTS_SKIP_MOVES;
                         if (useMcts) {
-                            document.getElementById('status').innerText = 'AI MCTS 思考中...';
+                            document.getElementById('status').innerText = t('aiMctsThinking');
                             console.log(`[mcts] 开始搜索 (${MCTS_SIMULATIONS} sims)...`);
                             bestMove = await mctsSearch(gameState.aiPlayer, myEpoch);
                             if (myEpoch !== aiEpoch || gameState.gameOver) return;  // 已被悔棋/重置
@@ -1263,7 +1438,7 @@
                 if (myEpoch !== aiEpoch || gameState.gameOver || bestMove < 0) return;
                 placePiece(bestMove, gameState.aiPlayer);
                 if (!checkGameOver(gameState.aiPlayer)) {
-                    document.getElementById('status').innerText = '请落子...';
+                    document.getElementById('status').innerText = t('yourTurn');
                     gameState.isAIMoving = false;
                     startClock('human');
                     computeHints();
@@ -1271,7 +1446,7 @@
             } catch (e) {
                 console.error(e);
                 stopClock();
-                document.getElementById('status').innerText = 'AI 引擎异常';
+                document.getElementById('status').innerText = t('aiEngineError');
             }
         }
 
@@ -1312,12 +1487,12 @@
                 if (gameState.aiPlayer === 1) {
                     // AI 先手: 重新触发 AI 开局落天元
                     gameState.isAIMoving = true;
-                    document.getElementById('status').innerText = 'AI 思考开局...';
+                    document.getElementById('status').innerText = t('aiOpening');
                     startClock('ai');
                     aiTimer = setTimeout(aiLogic, 1);
                 } else {
                     gameState.isAIMoving = false;
-                    document.getElementById('status').innerText = '执黑先行';
+                    document.getElementById('status').innerText = t('blackFirst');
                     startClock('human');
                     computeHints();
                 }
@@ -1327,7 +1502,7 @@
             // 正常悔棋后轮到玩家落子
             gameState.isAIMoving = false;
             document.getElementById('status').innerText =
-                gameState.humanPlayer === 1 ? '执黑先行' : '请落子...';
+                gameState.humanPlayer === 1 ? t('blackFirst') : t('yourTurn');
             startClock('human');
             computeHints();
         }
@@ -1341,7 +1516,7 @@
                 clearHints();
                 stopClock();
                 const isHumanWin = isWin && player === gameState.humanPlayer;
-                document.getElementById('status').innerText = isWin ? (isHumanWin ? '你赢了！' : 'AI 获胜') : '平局';
+                document.getElementById('status').innerText = isWin ? (isHumanWin ? t('youWin') : t('aiWins')) : t('draw');
                 document.getElementById('status').classList.remove('animate-pulse');
 
                 setTimeout(() => {
@@ -1352,12 +1527,12 @@
 
                     if (isWin) {
                         icon.innerText = isHumanWin ? '🎉' : '🤖';
-                        title.innerText = isHumanWin ? '你太厉害了！' : '哈哈你输了！';
-                        msg.innerText = isHumanWin ? '在对阵AI中获得了胜利。' : '继续努力吧！';
+                        title.innerText = isHumanWin ? t('humanWinTitle') : t('aiWinTitle');
+                        msg.innerText = isHumanWin ? t('humanWinMsg') : t('aiWinMsg');
                     } else {
                         icon.innerText = '🤝';
-                        title.innerText = '握手言和';
-                        msg.innerText = '双方棋力相当。';
+                        title.innerText = t('drawTitle');
+                        msg.innerText = t('drawMsg');
                     }
                     modal.classList.remove('hidden');
                 }, 1000);
@@ -1424,11 +1599,15 @@
             let lastErr = null;
             for (let i = 1; i <= attempts; i++) {
                 const detail = document.getElementById('loadingDetail');
-                if (detail) detail.textContent = `尝试后端 ${ep} (${i}/${attempts})...`;
+                if (detail) detail.textContent = t('tryingBackend', { ep, attempt: i, attempts });
                 console.log(`[onnx] 第 ${i}/${attempts} 次尝试后端: ${ep}`);
                 const loadPromise = ort.InferenceSession.create(modelPath, { executionProviders: [ep] });
                 const timeoutPromise = new Promise((_, reject) =>
-                    setTimeout(() => reject(new Error('加载超时(30s)，请检查网络或刷新重试')), 30000)
+                    setTimeout(() => {
+                        const error = new Error(t('loadTimeout'));
+                        error.code = 'LOAD_TIMEOUT';
+                        reject(error);
+                    }, 30000)
                 );
                 try {
                     return await Promise.race([loadPromise, timeoutPromise]);
@@ -1478,25 +1657,25 @@
             }
             return `
                 <hr class="my-3 border-gray-200"/>
-                <p class="font-bold text-gray-700">如果你是通过双击 index.html 直接打开的：</p>
-                <p class="text-gray-600">浏览器会禁止本地文件读取 AI 模型，请<b>完全退出 ${name}</b> 后，在终端/命令行运行以下命令启动：</p>
+                <p class="font-bold text-gray-700">${t('chromiumDirectOpenTitle')}</p>
+                <p class="text-gray-600">${t('chromiumDirectOpenInstructions', { browser: name })}</p>
                 <code class="block bg-gray-800 text-white p-2 rounded mt-1 break-all">${cmd}</code>
-                <p class="text-gray-500 mt-2">或者使用 VS Code <b>Live Server</b> 插件，或执行 <code class="text-gray-700">python -m http.server</code> 启动本地服务器后访问。</p>`;
+                <p class="text-gray-500 mt-2">${t('chromiumDirectOpenAlternative')}</p>`;
         }
         function firefoxLaunchHint() {
             return `
                 <hr class="my-3 border-gray-200"/>
-                <p class="font-bold text-gray-700">如果你是通过双击 index.html 直接打开的：</p>
-                <p class="text-gray-600">Firefox 有一个隐藏的 <b>about:config</b> 配置项，专门用来解除 file:// 协议下的跨域限制，<b>这是 Firefox 比 Edge/Chrome 更友好的地方</b>：</p>
+                <p class="font-bold text-gray-700">${t('firefoxDirectOpenTitle')}</p>
+                <p class="text-gray-600">${t('firefoxIntro')}</p>
                 <ol class="list-decimal ml-4 mt-1 space-y-1 text-gray-600">
-                    <li>在 Firefox 地址栏输入 <code class="bg-gray-100 px-1 rounded">about:config</code> 并回车</li>
-                    <li>点击 <b>“接受风险并继续”</b>（如果出现警告页面）</li>
-                    <li>在搜索框输入 <code class="bg-gray-100 px-1 rounded">privacy.file_unique_origin</code></li>
-                    <li>你会看到该值为 <b>true</b>（默认），<b>双击它，将其切换为 false</b></li>
-                    <li>关闭该标签页，<b>重启 Firefox</b></li>
-                    <li>再次双击你的 index.html，此时 fetch 本地 model_bs15_win5.onnx 将<b>不再报 CORS 错误</b>，模型可以正常加载</li>
+                    <li>${t('firefoxStep1')}</li>
+                    <li>${t('firefoxStep2')}</li>
+                    <li>${t('firefoxStep3')}</li>
+                    <li>${t('firefoxStep4')}</li>
+                    <li>${t('firefoxStep5')}</li>
+                    <li>${t('firefoxStep6')}</li>
                 </ol>
-                <p class="text-amber-700 mt-2">⚠️ <b>注意</b>：此设置会让本地 file:// 页面可以互相访问文件，有一定安全隐患（恶意本地 HTML 文件可读取你的本地文件）。建议调试完成后，<b>记得把该值改回 true</b>。</p>`;
+                <p class="text-amber-700 mt-2">${t('firefoxWarning')}</p>`;
         }
         function desktopLaunchHint() {
             if (isMobileUA()) return '';          // 移动端无法用命令行参数 / about:config，跳过
@@ -1536,7 +1715,9 @@
                 }
 
                 if (!model) {
-                    throw new Error(`所有推理后端均加载失败。最后错误: ${lastErr && lastErr.message}`);
+                    const error = new Error(t('allBackendsFailed', { error: lastErr && lastErr.message }));
+                    error.code = 'ALL_BACKENDS_FAILED';
+                    throw error;
                 }
 
                 gameState.model = model;
@@ -1560,22 +1741,23 @@
 
                 const mobile = isMobileUA();
                 icon.innerText = mobile ? "📱" : "🛠️";
-                title.innerText = mobile ? "手机端加载失败" : "引擎加载失败";
+                title.innerText = mobile ? t('mobileLoadFailed') : t('engineLoadFailed');
 
                 let errorDetail = e.message || String(e);
                 let suggestion = '';
 
                 // 根据真实错误给出具体建议
-                if (errorDetail.includes('所有推理后端')) {
-                    suggestion = '所有推理后端均不可用，请使用最新版 Chrome/Safari，并确认页面通过 http(s) 服务器访问（勿直接用 file:// 打开）。';
-                } else if (errorDetail.includes('Out of Memory') || errorDetail.includes('memory')) {
-                    suggestion = '当前手机内存不足，或因浏览器限制，请尝试关闭后台应用后刷新或更换浏览器。';
-                } else if (errorDetail.includes('超时') || errorDetail.includes('fetch')) {
-                    suggestion = '下载模型超时，请切换VPN重试。';
-                } else if (errorDetail.includes('WebAssembly') || errorDetail.includes('Compile')) {
-                    suggestion = '浏览器版本过低，请使用最新版 Chrome 或 Firefox 打开。';
+                const lowerError = errorDetail.toLowerCase();
+                if (e.code === 'ALL_BACKENDS_FAILED' || errorDetail.includes('所有推理后端')) {
+                    suggestion = t('suggestionAllBackends');
+                } else if (lowerError.includes('out of memory') || lowerError.includes('memory')) {
+                    suggestion = t('suggestionMemory');
+                } else if (e.code === 'LOAD_TIMEOUT' || errorDetail.includes('超时') || lowerError.includes('timeout') || lowerError.includes('fetch')) {
+                    suggestion = t('suggestionTimeout');
+                } else if (lowerError.includes('webassembly') || lowerError.includes('compile')) {
+                    suggestion = t('suggestionWasm');
                 } else {
-                    suggestion = '请复制下方错误信息反馈给开发者：';
+                    suggestion = t('suggestionGeneric');
                 }
 
                 const launchHint = desktopLaunchHint();
@@ -1585,28 +1767,28 @@
                         <p class="text-red-500 font-bold">❌ ${errorDetail}</p>
                         <p class="text-gray-600">💡 ${suggestion}</p>
                         <div class="bg-gray-100 p-2 rounded break-all text-[10px] text-gray-500">
-                            ${e.stack || '无堆栈信息'}
+                            ${e.stack || t('noStack')}
                         </div>
-                        ${mobile ? '<p class="text-gray-400 mt-2">✅ 建议使用 Android Chrome 或 iOS Safari 最新版</p>' : ''}
+                        ${mobile ? `<p class="text-gray-400 mt-2">${t('mobileReloadSuggestion')}</p>` : ''}
                         ${launchHint}
                     </div>
                 `;
 
-                btn.innerText = "🔄 重新加载";
+                btn.innerText = t('reload');
                 btn.onclick = () => window.location.reload();
 
                 modal.classList.remove('hidden');
-                document.getElementById('status').innerText = '引擎加载失败';
+                document.getElementById('status').innerText = t('engineLoadFailed');
             }
         }
 
         function updateLegend() {
             if (gameState.humanPlayer === 1) {
-                document.getElementById('labelP1').innerText = '玩家(黑)';
-                document.getElementById('labelP2').innerText = 'AI(白)';
+                document.getElementById('labelP1').innerText = t('playerBlack');
+                document.getElementById('labelP2').innerText = t('aiWhite');
             } else {
-                document.getElementById('labelP1').innerText = 'AI(黑)';
-                document.getElementById('labelP2').innerText = '玩家(白)';
+                document.getElementById('labelP1').innerText = t('aiBlack');
+                document.getElementById('labelP2').innerText = t('playerWhite');
             }
         }
 
@@ -1641,12 +1823,12 @@
 
             if (aiFirst) {
                 gameState.isAIMoving = true;
-                document.getElementById('status').innerText = 'AI 思考开局...';
+                document.getElementById('status').innerText = t('aiOpening');
                 startClock('ai');
                 aiTimer = setTimeout(aiLogic, 1);
             } else {
                 gameState.isAIMoving = false;
-                document.getElementById('status').innerText = '执黑先行';
+                document.getElementById('status').innerText = t('blackFirst');
                 startClock('human');
                 computeHints();
             }
