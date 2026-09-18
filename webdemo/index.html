@@ -26,15 +26,29 @@
     <style type="text/tailwindcss">
         @layer utilities {
             .board-wrapper {
-                @apply relative w-full aspect-square bg-wood shadow-2xl rounded-sm;
-                max-width: min(92vw, 600px);
+                @apply relative aspect-square bg-wood shadow-2xl rounded-sm;
+                width: 100%;
+                max-width: 100%;
+                flex: none;
                 margin: 0 auto;
+                --coord-side-label-left: -9px;
+                --coord-side-label-right: calc(100% + 9px);
+                --coord-bottom-label-top: calc(100% + 10px);
             }
-            @media (min-width: 768px) {
-                .board-wrapper { max-width: min(90vw, 660px); }
+            .board-frame {
+                position: relative;
+                display: flex;
+                justify-content: center;
+                width: 100%;
+                padding: 0 18px 20px;
             }
-            @media (min-width: 1280px) {
-                .board-wrapper { max-width: min(88vw, 720px); }
+            @media (max-width: 640px) {
+                .board-frame { padding: 0 14px 16px; }
+                .board-wrapper {
+                    --coord-side-label-left: -7px;
+                    --coord-side-label-right: calc(100% + 7px);
+                    --coord-bottom-label-top: calc(100% + 8px);
+                }
             }
             .grid-container {
                 @apply absolute inset-0;
@@ -122,11 +136,12 @@
                 animation: pulse-border 1.5s infinite;
             }
 
-            /* 坐标标识层: 与落子点网格共用同一几何, 不拦截点击 */
+            /* 坐标标识层: 位于棋盘外留白中, 不遮挡边线棋子与落子顺序 */
             .coordinates-layer {
                 @apply absolute inset-0;
                 pointer-events: none;
                 z-index: 25;
+                overflow: visible;
             }
             .coord-label {
                 position: absolute;
@@ -138,6 +153,9 @@
                 -webkit-user-select: none;
                 text-shadow: 0 0 3px rgba(255, 244, 224, 0.55);
             }
+            .coord-label.coord-bottom { top: var(--coord-bottom-label-top); }
+            .coord-label.coord-left { left: var(--coord-side-label-left); }
+            .coord-label.coord-right { left: var(--coord-side-label-right); }
 
             /* 对局计时: 当前行棋方高亮, 另一方淡显 */
             .clock-chip { @apply transition-colors duration-200; }
@@ -165,10 +183,16 @@
             }
             /* 刘海屏/全面屏安全区留白 */
             .safe-pad {
-                padding-top: max(1.5rem, env(safe-area-inset-top));
-                padding-right: max(1rem, env(safe-area-inset-right));
-                padding-bottom: max(1.5rem, env(safe-area-inset-bottom));
-                padding-left: max(1rem, env(safe-area-inset-left));
+                padding-top: max(0.5rem, env(safe-area-inset-top));
+                padding-right: max(0.5rem, env(safe-area-inset-right));
+                padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+                padding-left: max(0.5rem, env(safe-area-inset-left));
+            }
+            @media (max-height: 640px) {
+                .compact-hide { display: none; }
+            }
+            @media (max-height: 520px) {
+                .compact-header { display: none; }
             }
 
             @keyframes pulse-border {
@@ -179,89 +203,99 @@
         }
     </style>
 </head>
-<body class="bg-[#F4F1EA] min-h-screen flex flex-col items-center safe-pad font-sans text-primary">
-    
-    <div class="w-full max-w-[600px] sm:max-w-[680px] lg:max-w-[760px] mb-4 flex flex-col gap-4">
-        <div class="flex justify-between items-start px-2">
-            <div>
-                <h1 class="text-2xl md:text-3xl font-serif font-bold tracking-tight"><span data-i18n="pageTitle">五子棋</span> <span class="text-secondary font-sans">AI</span></h1>
-                <p class="text-[10px] uppercase tracking-[0.2em] opacity-50 text-line">Professional ResNet Engine</p>
-            </div>
-            <a href="https://github.com/whyb/Gomoku-AI/" target="_blank" class="flex items-center gap-2 bg-white/40 px-3 py-2 sm:py-1.5 rounded-full border border-white/60 hover:bg-white/80 transition-all shadow-sm">
-                <i class="fa fa-github text-lg"></i>
-                <span class="text-xs font-bold hidden sm:inline" data-i18n="aboutProject">关于本项目</span>
-            </a>
-        </div>
-        
-        <div class="flex flex-wrap items-center justify-between gap-x-4 gap-y-3 bg-white/60 backdrop-blur-sm p-3 sm:p-4 rounded-xl shadow-sm border border-white/40">
-            <div class="flex flex-wrap items-center gap-x-4 gap-y-2">
-                <div class="flex items-center gap-2">
-                    <div class="w-4 h-4 rounded-full piece-black shadow-sm"></div>
-                    <span id="labelP1" class="text-xs font-bold" data-i18n="playerBlack">玩家(黑)</span>
+<body class="bg-[#F4F1EA] h-[100dvh] min-h-0 overflow-hidden flex flex-col items-center safe-pad font-sans text-primary">
+    <main class="w-full max-w-[680px] lg:max-w-[760px] flex-1 min-h-0 flex flex-col items-center gap-2.5">
+        <div class="w-full shrink-0 flex flex-col gap-2.5">
+            <div class="compact-header flex items-center justify-between px-1">
+                <div>
+                    <h1 class="text-xl sm:text-2xl font-serif font-bold tracking-tight"><span data-i18n="pageTitle">五子棋</span> <span class="text-secondary font-sans">AI</span></h1>
+                    <p class="hidden sm:block text-[9px] uppercase tracking-[0.18em] opacity-50 text-line compact-hide">Professional ResNet Engine</p>
                 </div>
-                <div class="flex items-center gap-2">
-                    <div class="w-4 h-4 rounded-full piece-white shadow-sm"></div>
-                    <span id="labelP2" class="text-xs font-bold" data-i18n="aiWhite">AI(白)</span>
-                </div>
+                <a href="https://github.com/whyb/Gomoku-AI/" target="_blank" class="flex items-center gap-2 bg-white/40 px-2.5 py-1.5 rounded-full border border-white/60 hover:bg-white/80 transition-all shadow-sm">
+                    <i class="fa fa-github text-base"></i>
+                    <span class="text-xs font-bold hidden sm:inline" data-i18n="aboutProject">关于本项目</span>
+                </a>
             </div>
-            <div class="flex flex-wrap items-center gap-x-3 gap-y-2 justify-start sm:justify-end">
-                <label class="flex items-center gap-1.5 i18n-wrap-label">
-                    <span class="text-xs sm:text-[11px] font-medium" data-i18n="boardSize">棋盘大小</span>
-                    <select id="boardSize" class="bg-white/70 border border-gray-300 rounded-md text-xs sm:text-[11px] px-2 py-1.5 sm:px-1.5 sm:py-1 focus:ring-secondary focus:border-secondary">
-                        <option value="5">5</option>
-                        <option value="6">6</option>
-                        <option value="7">7</option>
-                        <option value="8">8</option>
-                        <option value="9">9</option>
-                        <option value="10">10</option>
-                        <option value="11">11</option>
-                        <option value="12">12</option>
-                        <option value="13">13</option>
-                        <option value="14">14</option>
-                        <option value="15" selected>15</option>
-                    </select>
-                </label>
-                <label class="flex items-center cursor-pointer gap-2 i18n-wrap-label">
-                    <input type="checkbox" id="aiFirst" class="w-5 h-5 sm:w-4 sm:h-4 rounded border-gray-300 text-secondary focus:ring-secondary" checked>
-                    <span class="text-xs sm:text-[11px] font-medium" data-i18n="aiFirst">AI先手</span>
-                </label>
-                <label class="flex items-center cursor-pointer gap-2 i18n-wrap-label">
-                    <input type="checkbox" id="hintEnabled" class="w-5 h-5 sm:w-4 sm:h-4 rounded border-gray-300 text-secondary focus:ring-secondary">
-                    <span class="text-xs sm:text-[11px] font-medium" data-i18n="moveHints">落子提示</span>
-                </label>
-                <label class="flex items-center cursor-pointer gap-2 i18n-wrap-label">
-                    <input type="checkbox" id="moveOrder" class="w-5 h-5 sm:w-4 sm:h-4 rounded border-gray-300 text-secondary focus:ring-secondary" checked>
-                    <span class="text-xs sm:text-[11px] font-medium" data-i18n="moveOrder">落子顺序</span>
-                </label>
-                <label class="flex items-center cursor-pointer gap-2 i18n-wrap-label" title="开启后 AI 每步使用 400 次蒙特卡洛树搜索（MCTS），棋力更强但思考更久" data-i18n-title="mctsTooltip">
-                    <input type="checkbox" id="mctsEnabled" class="w-5 h-5 sm:w-4 sm:h-4 rounded border-gray-300 text-secondary focus:ring-secondary">
-                    <span class="text-xs sm:text-[11px] font-medium" data-i18n="mctsThinking">MCTS 思考</span>
-                </label>
-                <div class="h-4 w-px bg-gray-300 mx-1 hidden sm:block"></div>
-                <button id="undo" class="i18n-action bg-amber-100 text-amber-800 border border-amber-500 text-xs sm:text-[11px] px-3.5 py-2 sm:px-3 sm:py-1.5 rounded-lg hover:bg-amber-500 hover:text-white transition-colors shadow-sm whitespace-nowrap" data-i18n="undo">
-                    悔棋
-                </button>
-                <button id="restart" class="i18n-action bg-primary text-white text-xs sm:text-[11px] px-3.5 py-2 sm:px-3 sm:py-1.5 rounded-lg hover:bg-secondary transition-colors shadow-sm whitespace-nowrap" data-i18n="resetGame">
-                    重置游戏
-                </button>
-            </div>
-        </div>
-        
-        <div id="status" class="text-center text-xs font-bold tracking-widest text-secondary uppercase animate-pulse" data-i18n="initializing">
-            正在初始化引擎...
-        </div>
-        <div class="mt-1.5 flex items-center justify-center gap-3 text-xs font-mono font-bold tracking-widest text-primary/60 select-none">
-            <span id="clockAi" class="clock-chip clock-idle">AI 00:00</span>
-            <span class="opacity-30">·</span>
-            <span id="clockHuman" class="clock-chip clock-idle" data-i18n="playerClockInitial">玩家 00:00</span>
-        </div>
-    </div>
 
-    <div id="boardWrapper" class="board-wrapper">
-        <div id="grid-bg" class="grid-container"></div>
-        <div id="board" class="interaction-layer"></div>
-        <div id="coordinates" class="coordinates-layer"></div>
-    </div>
+            <div class="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 bg-white/60 backdrop-blur-sm p-2 sm:p-2.5 rounded-xl shadow-sm border border-white/40">
+                <div class="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                    <div class="flex items-center gap-1.5">
+                        <div class="w-3.5 h-3.5 rounded-full piece-black shadow-sm"></div>
+                        <span id="labelP1" class="text-[11px] font-bold" data-i18n="playerBlack">玩家(黑)</span>
+                    </div>
+                    <div class="flex items-center gap-1.5">
+                        <div class="w-3.5 h-3.5 rounded-full piece-white shadow-sm"></div>
+                        <span id="labelP2" class="text-[11px] font-bold" data-i18n="aiWhite">AI(白)</span>
+                    </div>
+                </div>
+                <div class="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 justify-start sm:justify-end">
+                    <label class="flex items-center gap-1 i18n-wrap-label">
+                        <span class="text-[11px] font-medium" data-i18n="boardSize">棋盘大小</span>
+                        <select id="boardSize" class="bg-white/70 border border-gray-300 rounded-md text-[11px] px-1.5 py-1 focus:ring-secondary focus:border-secondary">
+                            <option value="5">5</option>
+                            <option value="6">6</option>
+                            <option value="7">7</option>
+                            <option value="8">8</option>
+                            <option value="9">9</option>
+                            <option value="10">10</option>
+                            <option value="11">11</option>
+                            <option value="12">12</option>
+                            <option value="13">13</option>
+                            <option value="14">14</option>
+                            <option value="15" selected>15</option>
+                        </select>
+                    </label>
+                    <label class="flex items-center cursor-pointer gap-1.5 i18n-wrap-label">
+                        <input type="checkbox" id="aiFirst" class="w-4 h-4 rounded border-gray-300 text-secondary focus:ring-secondary" checked>
+                        <span class="text-[11px] font-medium" data-i18n="aiFirst">AI先手</span>
+                    </label>
+                    <label class="flex items-center cursor-pointer gap-1.5 i18n-wrap-label">
+                        <input type="checkbox" id="hintEnabled" class="w-4 h-4 rounded border-gray-300 text-secondary focus:ring-secondary">
+                        <span class="text-[11px] font-medium" data-i18n="moveHints">落子提示</span>
+                    </label>
+                    <label class="flex items-center cursor-pointer gap-1.5 i18n-wrap-label">
+                        <input type="checkbox" id="moveOrder" class="w-4 h-4 rounded border-gray-300 text-secondary focus:ring-secondary" checked>
+                        <span class="text-[11px] font-medium" data-i18n="moveOrder">落子顺序</span>
+                    </label>
+                    <label class="flex items-center cursor-pointer gap-1.5 i18n-wrap-label" title="开启后 AI 每步使用 400 次蒙特卡洛树搜索（MCTS），棋力更强但思考更久" data-i18n-title="mctsTooltip">
+                        <input type="checkbox" id="mctsEnabled" class="w-4 h-4 rounded border-gray-300 text-secondary focus:ring-secondary">
+                        <span class="text-[11px] font-medium" data-i18n="mctsThinking">MCTS 思考</span>
+                    </label>
+                    <div class="h-3.5 w-px bg-gray-300 mx-0.5 hidden sm:block"></div>
+                    <button id="undo" class="i18n-action bg-amber-100 text-amber-800 border border-amber-500 text-[11px] px-2.5 py-1 rounded-lg hover:bg-amber-500 hover:text-white transition-colors shadow-sm whitespace-nowrap" data-i18n="undo">
+                        悔棋
+                    </button>
+                    <button id="restart" class="i18n-action bg-primary text-white text-[11px] px-2.5 py-1 rounded-lg hover:bg-secondary transition-colors shadow-sm whitespace-nowrap" data-i18n="resetGame">
+                        重置游戏
+                    </button>
+                </div>
+            </div>
+
+            <div class="flex items-center justify-center gap-2 min-h-5 px-1 text-[11px] font-mono font-bold tracking-[0.08em] text-primary/60 select-none whitespace-nowrap">
+                <span id="status" class="font-sans text-center tracking-[0.12em] text-secondary uppercase animate-pulse" data-i18n="initializing">
+                    正在初始化引擎...
+                </span>
+                <span class="opacity-30">·</span>
+                <span id="clockAi" class="clock-chip clock-idle">AI 00:00</span>
+                <span class="opacity-30">·</span>
+                <span id="clockHuman" class="clock-chip clock-idle" data-i18n="playerClockInitial">玩家 00:00</span>
+            </div>
+        </div>
+
+        <div id="boardArea" class="w-full flex-1 min-h-0 flex items-center justify-center">
+            <div id="boardFrame" class="board-frame">
+                <div id="boardWrapper" class="board-wrapper">
+                    <div id="grid-bg" class="grid-container"></div>
+                    <div id="board" class="interaction-layer"></div>
+                    <div id="coordinates" class="coordinates-layer"></div>
+                </div>
+            </div>
+        </div>
+
+        <footer class="shrink-0 mt-0.5 text-[9px] text-gray-400 font-medium tracking-tighter opacity-60 compact-hide">
+            POWERED BY ONNX RUNTIME WEB &amp; TAILWIND CSS
+        </footer>
+    </main>
 
     <div id="resultModal" class="fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-6 hidden">
         <div class="bg-white rounded-2xl p-8 max-w-xs w-full text-center shadow-2xl transform transition-all scale-110">
@@ -278,10 +312,6 @@
             </div>
         </div>
     </div>
-
-    <footer class="mt-8 text-[10px] text-gray-400 font-medium tracking-tighter opacity-60">
-        POWERED BY ONNX RUNTIME WEB & TAILWIND CSS
-    </footer>
 
     <div id="loading" class="fixed inset-0 bg-white/90 z-50 flex flex-col items-center justify-center">
         <div class="w-12 h-12 border-4 border-secondary border-t-transparent rounded-full animate-spin"></div>
@@ -556,7 +586,7 @@
         }
 
         // 棋盘坐标: 底下列字母 A..(按棋盘大小截取), 两侧行号 1..(1 在底部, 从下往上递增)
-        // 坐标与交叉线严格对齐: 交互层每个格子中心 = 一条交叉线, 边缘留白中心 = 坐标显示位
+        // 坐标中心与交叉线对齐, 但整体落在棋盘外留白中, 不会遮挡边线棋子和落子顺序
         function drawCoordinates() {
             const layer = document.getElementById('coordinates');
             const wrapper = document.getElementById('boardWrapper');
@@ -565,17 +595,14 @@
             const B = boardSize;
             const cell = wrapper.clientWidth / B;
             if (!cell || !isFinite(cell)) return;
-            const fontPx = Math.max(9, Math.min(cell * 0.36, 20));
-            const xIn = 100 / (4 * B);   // 左右留白中心 (占棋盘宽度的百分比)
-            const yBottom = 100 - xIn;   // 底部留白中心 (占棋盘高度的百分比)
+            const fontPx = Math.max(9, Math.min(cell * 0.38, 18));
 
-            // 横向列: A 到 O (非 15 路棋盘按实际大小截取), 显示在棋盘最底部
+            // 横向列: A 到 O (非 15 路棋盘按实际大小截取), 显示在棋盘下方
             for (let c = 0; c < B; c++) {
                 const label = document.createElement('span');
-                label.className = 'coord-label';
+                label.className = 'coord-label coord-bottom';
                 label.textContent = String.fromCharCode(65 + c);
                 label.style.left = `${((c + 0.5) / B) * 100}%`;
-                label.style.top = `${yBottom}%`;
                 label.style.fontSize = `${fontPx}px`;
                 layer.appendChild(label);
             }
@@ -584,14 +611,32 @@
             for (let r = 0; r < B; r++) {
                 for (const side of ['left', 'right']) {
                     const label = document.createElement('span');
-                    label.className = 'coord-label';
+                    label.className = `coord-label coord-${side}`;
                     label.textContent = B - r;
-                    label.style.left = side === 'left' ? `${xIn}%` : `${100 - xIn}%`;
                     label.style.top = `${((r + 0.5) / B) * 100}%`;
                     label.style.fontSize = `${fontPx}px`;
                     layer.appendChild(label);
                 }
             }
+        }
+
+        // 棋盘外层留白不计入落子区；按浏览器剩余高度选择棋盘边长。
+        function fitBoardToViewport() {
+            const area = document.getElementById('boardArea');
+            const frame = document.getElementById('boardFrame');
+            const wrapper = document.getElementById('boardWrapper');
+            if (!area || !frame || !wrapper) return;
+
+            const style = getComputedStyle(frame);
+            const horizontalPadding = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+            const bottomPadding = parseFloat(style.paddingBottom) || 0;
+            const availableWidth = area.clientWidth - horizontalPadding;
+            const availableHeight = area.clientHeight - bottomPadding;
+            const size = Math.floor(Math.min(availableWidth, availableHeight, 720));
+            if (!isFinite(size) || size <= 0) return;
+
+            wrapper.style.width = `${size}px`;
+            wrapper.style.height = `${size}px`;
         }
 
         function showHoverCorners(index) {
@@ -1686,6 +1731,7 @@
 
         // ========= 2. 重写 init 函数（自动选后端 + 重试 + CPU 保底） =========
         async function init() {
+            fitBoardToViewport();
             drawGrid();
             initInteractions();
             drawCoordinates();
@@ -1847,8 +1893,24 @@
         };
         document.getElementById('moveOrder').onchange = refreshMoveNumbers;
         
-        // 窗口尺寸变化 (旋转/缩放) 时重新对齐坐标
-        window.addEventListener('resize', () => { drawCoordinates(); refreshMoveNumbers(); });
+        // 窗口尺寸变化 (旋转/缩放) 时重新适配棋盘并重新对齐坐标
+        window.addEventListener('resize', () => {
+            fitBoardToViewport();
+            drawCoordinates();
+            refreshMoveNumbers();
+        });
+        const boardArea = document.getElementById('boardArea');
+        if (boardArea && 'ResizeObserver' in window) {
+            let fitFrame = 0;
+            new ResizeObserver(() => {
+                cancelAnimationFrame(fitFrame);
+                fitFrame = requestAnimationFrame(() => {
+                    fitBoardToViewport();
+                    drawCoordinates();
+                    refreshMoveNumbers();
+                });
+            }).observe(boardArea);
+        }
         window.onload = init;
     </script>
 </body>
